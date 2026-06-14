@@ -304,9 +304,9 @@ _BF16_TO_FP8E4M3_TRUNC_ASM = """\
     or.b32  $0, out, o3;
 }"""
 
-# Wire in RNE (comment this line and uncomment the next to use TRUNC):
-_BF16_TO_FP8E4M3_ASM = _BF16_TO_FP8E4M3_RNE_ASM
-# _BF16_TO_FP8E4M3_ASM = _BF16_TO_FP8E4M3_TRUNC_ASM
+# Wire in TRUNC (comment this line and uncomment the next to use RNE):
+_BF16_TO_FP8E4M3_ASM = _BF16_TO_FP8E4M3_TRUNC_ASM
+# _BF16_TO_FP8E4M3_ASM = _BF16_TO_FP8E4M3_RNE_ASM
 
 # ---- decode: fp8e4m3 -> bf16 (exact PRMT-as-LUT) ----------------------------
 _FP8E4M3_TO_BF16_ASM = """\

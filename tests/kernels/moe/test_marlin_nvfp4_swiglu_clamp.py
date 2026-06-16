@@ -4,12 +4,11 @@
 Test that the Marlin NVFP4 MoE backend correctly applies the SwiGLU clamp
 (gemm1_clamp_limit / swiglu_limit) when it is present in the quant config.
 
-Mirrors the `silu_clamp` parametrize case from test_trtllm_nvfp4_moe.py but
-targets the Marlin backend (SM75+) instead of TRTLLM (SM100-only).
-
-The swiglu_limit is needed for models such as DeepSeek V4 Flash whose
-quantization config carries a per-layer activation clamp value to prevent
-quantization spikes when activation magnitudes exceed the fp4 calibration range.
+Mirrors the silu_clamp case from test_trtllm_nvfp4_moe.py but targets the
+Marlin backend (SM75+) instead of TRTLLM (SM100-only).  The swiglu_limit is
+needed for models such as DeepSeek V4 Flash whose quantization config carries a
+per-layer activation clamp value to prevent quantization spikes when activation
+magnitudes exceed the fp4 calibration range.
 """
 
 import pytest
@@ -29,25 +28,24 @@ from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import nvfp4_moe_quant_config
+from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
+    MarlinExpertsBase,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     make_moe_prepare_and_finalize_no_dp_ep,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
-pytestmark = pytest.mark.skipif(
-    not current_platform.has_device_capability((7, 5)),
-    reason="Marlin requires SM75+",
-)
+if not current_platform.has_device_capability((7, 5)):
+    pytest.skip("Marlin requires SM75+", allow_module_level=True)
 
-# DSV4 Flash MoE dims: hidden=7168, intermediate=2048, 256 experts, top-2
-# Use smaller shapes here so the test runs quickly on any Ampere/Hopper card.
 MNK_FACTORS = [
     (2, 1024, 1024),
     (64, 2048, 1536),
 ]
 
-_SWIGLU_LIMIT = 7.0  # typical value from DSV4 Flash config
+_SWIGLU_LIMIT = 7.0
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
@@ -70,8 +68,6 @@ def test_marlin_nvfp4_moe_swiglu_clamp(
     with set_current_vllm_config(
         VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
     ):
-        # Scale activations to produce values that exceed the clamp limit,
-        # so a missing clamp would produce a measurably different result.
         a = torch.randn((m, k), device="cuda", dtype=dtype) * _SWIGLU_LIMIT * 3
 
         (_, w1_q, w1_blockscale, w1_gs), (_, w2_q, w2_blockscale, w2_gs) = (
@@ -105,14 +101,16 @@ def test_marlin_nvfp4_moe_swiglu_clamp(
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
 
-        moe_config = make_dummy_moe_config()
+        moe_config = make_dummy_moe_config(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=n,
+        )
 
         marlin_kernel = mk.FusedMoEKernel(
             make_moe_prepare_and_finalize_no_dp_ep(use_monolithic=False),
-            mk.FusedMoEKernel.select_expert_impl(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            ),
+            MarlinExpertsBase(moe_config=moe_config, quant_config=quant_config),
         )
 
         marlin_output = marlin_kernel.apply(
@@ -127,7 +125,6 @@ def test_marlin_nvfp4_moe_swiglu_clamp(
             apply_router_weight_on_input=False,
         )
 
-        # Reference: dequantize and run torch_moe with SiluAndMulWithClamp
         a_global_scale = ((FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / a.abs().max()).to(
             torch.float32
         )

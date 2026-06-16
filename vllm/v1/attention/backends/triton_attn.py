@@ -464,6 +464,7 @@ class TritonAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        
         cap = current_platform.get_device_capability()
         cap_str = cap.as_version_str() if cap is not None else "unknown"
         dev = current_platform.get_device_name()
@@ -499,6 +500,7 @@ class TritonAttentionImpl(AttentionImpl):
                 f"{cap_str}); bfloat16 requires SM80+. Re-run with "
                 f"--kv-cache-dtype float16."
             )
+
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0

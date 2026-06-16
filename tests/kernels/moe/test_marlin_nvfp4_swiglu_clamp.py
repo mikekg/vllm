@@ -36,7 +36,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 )
 from vllm.utils.torch_utils import set_random_seed
 
-if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 7:
+if torch.cuda.get_device_capability()[0] < 7:
     pytest.skip(
         "Marlin requires SM75+ (CUDA compute capability >= 7.5)",
         allow_module_level=True,

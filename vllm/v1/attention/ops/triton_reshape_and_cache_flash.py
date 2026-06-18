@@ -10,9 +10,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
-from vllm.v1.kv_cache_interface import KVQuantMode
 from vllm.v1.attention.ops.fp8e4nv_fp16_sm75 import fp16_to_fp8e4m3
 from vllm.v1.attention.ops.fp8e4nv_sm80 import bf16_to_fp8e4m3
+from vllm.v1.kv_cache_interface import KVQuantMode
 
 
 def _fp8_software_conv(kv_cache_dtype: str) -> bool:
@@ -26,6 +26,7 @@ def _fp8_software_conv(kv_cache_dtype: str) -> bool:
         and current_platform.has_device_capability(75)
         and not current_platform.has_device_capability(89)
     )
+
 
 FP8_MIN, FP8_MAX = get_fp8_min_max()
 

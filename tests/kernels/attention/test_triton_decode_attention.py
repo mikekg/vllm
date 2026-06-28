@@ -325,3 +325,89 @@ def test_decode_attention_cross_layer_view(H_Q, H_KV, D_QK, D_V, is_mla, PAGE_SI
     # Same data and same compute order; only addressing differs.
     assert torch.equal(o_ref, o_xl)
     assert torch.equal(lse_ref, lse_xl)
+
+
+@pytest.mark.skipif(DEVICE_TYPE == "cpu", reason="TRITON_MLA decode requires a GPU")
+@pytest.mark.parametrize("cache_dtype", ["bf16", "fp8_e4m3"])
+def test_decode_attention_mla_head_size_576(cache_dtype):
+    """Validate the 576-dim MLA decode shape against a torch reference.
+
+    The MLA cache stores a 512-dim compressed value plus a 64-dim RoPE
+    component. This exercises the grouped Triton path's explicit
+    ``BLOCK_DMODEL=512, BLOCK_DPE=64`` specialization.
+    """
+    device = torch.device(DEVICE_TYPE)
+    dtype = torch.bfloat16
+    batch_size = 2
+    num_q_heads = 16
+    seq_len = 17
+    page_size = 16
+    num_pages = 2
+    kv_lora_rank = 512
+    rope_dim = 64
+    head_size = kv_lora_rank + rope_dim
+    num_kv_splits = 1
+
+    req_to_page = torch.tensor(
+        [[0, 1], [1, 0]], dtype=torch.int32, device=device
+    ).unsqueeze(-1)
+    b_seq_len = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
+    q = torch.randn(batch_size, num_q_heads, head_size, dtype=dtype, device=device)
+    k_bf16 = torch.randn(num_pages, page_size, 1, head_size, dtype=dtype, device=device)
+    if cache_dtype == "fp8_e4m3":
+        k_buffer, k_scale = _quantize_to_fp8(k_bf16)
+    else:
+        k_buffer, k_scale = k_bf16, None
+    v_buffer = k_buffer[..., :kv_lora_rank]
+    output = torch.zeros(
+        batch_size, num_q_heads, kv_lora_rank, dtype=dtype, device=device
+    )
+    lse = torch.zeros(batch_size, num_q_heads, dtype=dtype, device=device)
+    attn_logits = torch.empty(
+        batch_size,
+        num_q_heads,
+        num_kv_splits,
+        kv_lora_rank + 1,
+        dtype=torch.float32,
+        device=device,
+    )
+    sm_scale = 1.0 / (head_size**0.5)
+
+    decode_attention_fwd(
+        q,
+        k_buffer,
+        v_buffer,
+        output,
+        lse,
+        req_to_page,
+        b_seq_len,
+        attn_logits,
+        num_kv_splits,
+        sm_scale,
+        page_size=page_size,
+        is_mla=True,
+        k_scale=k_scale,
+        v_scale=k_scale,
+    )
+
+    token_offsets = torch.arange(seq_len, device=device)
+    page_ids = req_to_page.squeeze(-1)
+    page_indices = page_ids[:, token_offsets // page_size]
+    in_page = token_offsets % page_size
+    k_tokens = k_buffer[page_indices, in_page, 0]
+    if k_scale is not None:
+        k_tokens = k_tokens.float() * k_scale
+    q_nope, q_pe = q.split([kv_lora_rank, rope_dim], dim=-1)
+    k_nope, k_pe = k_tokens.split([kv_lora_rank, rope_dim], dim=-1)
+    scores = (
+        torch.einsum("bhd,bld->bhl", q_nope.float(), k_nope.float())
+        + torch.einsum("bhd,bld->bhl", q_pe.float(), k_pe.float())
+    ) * sm_scale
+    ref_lse = torch.logsumexp(scores, dim=-1)
+    ref_output = torch.einsum(
+        "bhl,bld->bhd", torch.softmax(scores, dim=-1), k_nope.float()
+    ).to(dtype)
+
+    tolerance = 5e-1 if k_scale is not None else 5e-2
+    torch.testing.assert_close(output, ref_output, atol=tolerance, rtol=5e-2)
+    torch.testing.assert_close(lse.float(), ref_lse, atol=tolerance, rtol=5e-2)

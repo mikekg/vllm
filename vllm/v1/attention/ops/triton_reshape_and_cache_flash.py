@@ -23,6 +23,7 @@ def _fp8_software_conv(kv_cache_dtype: str) -> bool:
         and not current_platform.has_device_capability(89)
     )
 
+
 FP8_MIN, FP8_MAX = get_fp8_min_max()
 
 _NATIVE_KV_CACHE_DTYPES = {"auto", "float16", "bfloat16", "float32", "half", "float"}

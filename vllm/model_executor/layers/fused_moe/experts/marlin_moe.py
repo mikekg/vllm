@@ -594,6 +594,19 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         self.w2_g_idx_sort_indices = w2_g_idx_sort_indices
         self.is_k_full = is_k_full
         self.input_dtype = get_marlin_input_dtype()
+        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        if self.gemm1_clamp_limit is None:
+            self.gemm1_clamp_limit = moe_config.swiglu_limit
+
+        gemm1_alpha = quant_config.gemm1_alpha
+        if gemm1_alpha is None:
+            gemm1_alpha = moe_config.swiglu_alpha
+        self.gemm1_alpha = 1.0 if gemm1_alpha is None else gemm1_alpha
+
+        gemm1_beta = quant_config.gemm1_beta
+        if gemm1_beta is None:
+            gemm1_beta = moe_config.swiglu_beta
+        self.gemm1_beta = 0.0 if gemm1_beta is None else gemm1_beta
 
         super().__init__(
             moe_config=moe_config,

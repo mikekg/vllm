@@ -107,19 +107,35 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 device=self.device,
             )
 
-        self.gemm1_clamp_limit = _per_expert(quant_config.gemm1_clamp_limit)
-        self.gemm1_alpha = _per_expert(quant_config.gemm1_alpha)
-        self.gemm1_beta = _per_expert(quant_config.gemm1_beta)
+        clamp = quant_config.gemm1_clamp_limit
+        if clamp is None:
+            clamp = moe_config.swiglu_limit
+        alpha = quant_config.gemm1_alpha
+        if alpha is None:
+            alpha = moe_config.swiglu_alpha
+        beta = quant_config.gemm1_beta
+        if beta is None:
+            beta = moe_config.swiglu_beta
 
-        if (
-            quant_config.weight_quant_dtype == "mxfp4"
-            and quant_config.quant_dtype == "mxfp8"
-        ):
-            self.fake_input_scale = torch.ones(
-                self.num_experts,
-                device=self.device,
-                dtype=torch.float32,
-            )
+        self.gemm1_clamp_limit = _per_expert(clamp)
+        self.gemm1_alpha = _per_expert(alpha)
+        self.gemm1_beta = _per_expert(beta)
+
+        if quant_config.weight_quant_dtype == "mxfp4":
+            # This value is used specifically for gpt-oss,
+            # Need to revisit this for other models
+            if self.gemm1_alpha is None:
+                self.gemm1_alpha = _per_expert(1.702)
+            if self.gemm1_beta is None:
+                self.gemm1_beta = _per_expert(1.0)
+            if self.gemm1_clamp_limit is None:
+                self.gemm1_clamp_limit = _per_expert(7.0)
+            if quant_config.quant_dtype == "mxfp8":
+                self.fake_input_scale = torch.ones(
+                    self.num_experts,
+                    device=self.device,
+                    dtype=torch.float32,
+                )
 
     @property
     def expects_unquantized_inputs(self) -> bool:

@@ -57,6 +57,34 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
 
+def _marlin_moe_exec_config(
+    block_size_m: int,
+    K: int,
+    N: int,
+    w13_num_shards: int,
+    quant_type: ScalarType,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    global_scale1: torch.Tensor | None,
+    global_scale2: torch.Tensor | None,
+) -> tuple[int, int, int]:
+    """Use the measured four-block FP4 config only where its tiles fit."""
+    if (
+        block_size_m == 8
+        and quant_type == scalar_types.float4_e2m1f
+        and w1_scale.dtype == torch.float8_e4m3fn
+        and w2_scale.dtype == torch.float8_e4m3fn
+        and global_scale1 is not None
+        and global_scale2 is not None
+        and current_platform.is_device_capability(90)
+        and K % 128 == 0
+        and N % 64 == 0
+        and w13_num_shards * N % 128 == 0
+    ):
+        return (64, 128, 4)
+    return (-1, -1, -1)
+
+
 def _fused_marlin_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -99,6 +127,17 @@ def _fused_marlin_moe(
     M, K = hidden_states.size()
     N = marlin_moe_intermediate_size(w1, w2)
     w13_num_shards = 2 if activation.is_gated else 1
+    thread_k, thread_n, blocks_per_sm = _marlin_moe_exec_config(
+        block_size_m,
+        K,
+        N,
+        w13_num_shards,
+        quant_type,
+        w1_scale,
+        w2_scale,
+        global_scale1,
+        global_scale2,
+    )
     if workspace is None:
         workspace = marlin_make_workspace_new(hidden_states.device, 4)
 
@@ -160,6 +199,9 @@ def _fused_marlin_moe(
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
+        thread_k=thread_k,
+        thread_n=thread_n,
+        blocks_per_sm=blocks_per_sm,
     )
     activation_input = intermediate_cache1.view(-1, w13_num_shards * N)
     if activation_func is None:
@@ -227,6 +269,9 @@ def _fused_marlin_moe(
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
+        thread_k=thread_k,
+        thread_n=thread_n,
+        blocks_per_sm=blocks_per_sm,
     )
 
     return output

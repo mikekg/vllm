@@ -8,6 +8,7 @@ Run `pytest tests/kernels/test_moe.py`.
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -38,6 +39,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.experts import marlin_moe
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
@@ -261,6 +263,39 @@ FUSED_MOE_WN16_MNK_FACTORS = [
 ]
 
 vllm_config = VllmConfig()
+
+
+def test_marlin_moe_four_block_config(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        marlin_moe,
+        "current_platform",
+        SimpleNamespace(is_device_capability=lambda capability: capability == 90),
+    )
+    select = marlin_moe._marlin_moe_exec_config
+    nvfp4_scale = SimpleNamespace(dtype=torch.float8_e4m3fn)
+    mxfp4_scale = SimpleNamespace(dtype=torch.uint8)
+    global_scale = object()
+
+    def config(block_size_m=8, N=3072, scale=nvfp4_scale):
+        return select(
+            block_size_m,
+            6144,
+            N,
+            2,
+            scalar_types.float4_e2m1f,
+            scale,
+            scale,
+            global_scale,
+            global_scale,
+        )
+
+    assert config() == (64, 128, 4)
+    assert config(block_size_m=16) == (-1, -1, -1)
+    assert config(N=3073) == (-1, -1, -1)
+    assert config(scale=mxfp4_scale) == (-1, -1, -1)
+
+    marlin_moe.current_platform.is_device_capability = lambda _: False
+    assert config() == (-1, -1, -1)
 
 
 def run_moe_test(

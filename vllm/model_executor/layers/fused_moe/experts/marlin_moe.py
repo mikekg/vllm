@@ -199,9 +199,12 @@ def _fused_marlin_moe(
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
-        thread_k=thread_k,
-        thread_n=thread_n,
-        blocks_per_sm=blocks_per_sm,
+        # Keep W13 on the automatic selector. OCI traces show that its
+        # four-block launch overlaps and contends with the shared-expert down
+        # projection; the W2 launch below is the isolated experiment.
+        thread_k=-1,
+        thread_n=-1,
+        blocks_per_sm=-1,
     )
     activation_input = intermediate_cache1.view(-1, w13_num_shards * N)
     if activation_func is None:

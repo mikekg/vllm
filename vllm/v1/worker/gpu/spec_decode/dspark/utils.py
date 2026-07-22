@@ -53,6 +53,13 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     draft_vllm_config = replace(
         vllm_config,
+        # Quantization dispatch may resolve lazily from the current config and
+        # memoize on its quant_config. Build the draft under its own config so
+        # its native MXFP4 experts do not inherit an NVFP4 target's operators.
+        model_config=draft_model_config,
+        quant_config=VllmConfig.get_quantization_config(
+            draft_model_config, vllm_config.load_config
+        ),
         attention_config=replace(
             vllm_config.attention_config,
             use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),

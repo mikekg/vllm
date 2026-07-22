@@ -1395,6 +1395,13 @@ class SpeculativeConfig:
                         self.target_model_config.quantization
                     )
                     self.update_arch_()
+                    # The earlier override hid DeepSeek-V4's expert-aware FP8
+                    # quantization method while ModelConfig was initialized.
+                    # Restore it after restoring the DeepSeek-V4 model type so
+                    # the draft checkpoint's expert_dtype selects MXFP4 rather
+                    # than inheriting the NVFP4 target's expert format.
+                    if self.draft_model_config.quantization == "fp8":
+                        self.draft_model_config.quantization = "deepseek_v4_fp8"
                 elif (
                     self.method == "dspark"
                     and "Gemma4DSparkModel" in self.draft_model_config.architectures

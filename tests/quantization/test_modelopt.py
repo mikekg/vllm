@@ -25,6 +25,8 @@ from vllm.model_executor.kernels.linear import (
     MarlinNvFp4LinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     LINEAR_ALGOS,
@@ -33,6 +35,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
+    ModelOptNvFp4FusedMoE,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
@@ -730,12 +733,60 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         moe = ModelOptNvFp4FusedMoE(config, MagicMock())
 
     assert moe.use_a16 is expected_use_a16
+    assert moe.intermediate_size_per_partition_alignment == config.group_size
     _, kwargs = mock_select.call_args
     assert kwargs["weight_key"] is kNvfp4Static
     if act_key_is_none:
         assert kwargs["activation_key"] is None
     else:
         assert kwargs["activation_key"] is kNvfp4Dynamic
+
+
+def test_modelopt_nvfp4_tp_shards_are_group_aligned():
+    method = object.__new__(ModelOptNvFp4FusedMoE)
+    method.quant_config = MagicMock(group_size=16)
+    method.intermediate_size_per_partition_alignment = 16
+    _, shard_size = method.maybe_roundup_sizes(
+        2048,
+        1856 // 8,
+        torch.bfloat16,
+        FusedMoEParallelConfig.make_no_parallel(),
+    )
+    assert shard_size == 240
+
+    loader = MagicMock(spec=RoutedExperts)
+    loader.quant_method = method
+    loader.moe_config = MagicMock(is_act_and_mul=True)
+    loader._get_hidden_dim = RoutedExperts._get_hidden_dim
+    loader._narrow_expert_data_for_padding = (
+        RoutedExperts._narrow_expert_data_for_padding
+    )
+
+    w1_weight = torch.full((480, 1), 255, dtype=torch.uint8)
+    checkpoint_weight = torch.arange(1856, dtype=torch.int64).to(torch.uint8)[:, None]
+    RoutedExperts._load_w13(
+        loader,
+        w1_weight,
+        shard_dim=0,
+        shard_id="w1",
+        loaded_weight=checkpoint_weight,
+        tp_rank=7,
+    )
+    assert torch.equal(w1_weight[:176], checkpoint_weight[1680:])
+    assert torch.count_nonzero(w1_weight[176:240]) == 0
+    assert torch.all(w1_weight[240:] == 255)
+
+    w2_scale = torch.full((1, 15), -1.0)
+    checkpoint_scale = torch.arange(116, dtype=torch.float32)[None]
+    RoutedExperts._load_w2(
+        loader,
+        w2_scale,
+        shard_dim=1,
+        loaded_weight=checkpoint_scale,
+        tp_rank=7,
+    )
+    assert torch.equal(w2_scale[:, :11], checkpoint_scale[:, 105:])
+    assert torch.count_nonzero(w2_scale[:, 11:]) == 0
 
 
 @pytest.mark.parametrize(

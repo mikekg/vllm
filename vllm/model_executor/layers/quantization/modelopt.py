@@ -2220,9 +2220,8 @@ def select_linear_kernel(spec: QuantSpec, layer, rt: RuntimeDtypes):
     w = spec.weight
     assert isinstance(w, QuantKey), f"resolve() must supply a weight key, got {w!r}"
     if w.dtype == FP4_DTYPE:
-        # W4A16 (activation is None) → use_a16=True defaults to Marlin *and*
-        # honors --linear-backend (matches upstream ModelOptNvFp4W4A16LinearMethod
-        # after #50273); W4A4 → use_a16=False.
+        # W4A16 (activation is None) → use_a16=True selects a W4A16 backend and
+        # honors --linear-backend; W4A4 → use_a16=False.
         return init_nvfp4_linear_kernel(use_a16=spec.activation is None)
     if w.scale.dtype == MXFP8_SCALE_DTYPE:
         return init_mxfp8_linear_kernel()

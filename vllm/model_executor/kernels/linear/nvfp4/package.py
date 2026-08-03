@@ -68,9 +68,7 @@ class NvFp4PackageLinearKernel(NvFp4LinearKernel):
             scale_factor = float(
                 (unadjusted_alpha / sidecar.weight_global_scale).item()
             )
-            sidecar_valid = entry102_scales_are_lossless(
-                raw_scales, scale_factor
-            )
+            sidecar_valid = entry102_scales_are_lossless(raw_scales, scale_factor)
 
         weight, weight_scale, global_scale, layout, logical_shape = nvfp4_weight_prep(
             (
@@ -105,10 +103,10 @@ class NvFp4PackageLinearKernel(NvFp4LinearKernel):
                 and tuple(sidecar.weight_scale.shape) == (k // 16, n)
                 and sidecar.weight_global_scale.dtype == torch.float32
                 and sidecar.weight_global_scale.numel() == 1
-                and blob_bytes == 136_315_392
+                and blob_bytes == 135_266_816
             )
 
-        if sidecar_valid:
+        if sidecar_valid and sidecar is not None:
             weight_bytes = packed_b.numel()
             counter_bytes = 512
             workspace = torch.empty(
@@ -119,15 +117,11 @@ class NvFp4PackageLinearKernel(NvFp4LinearKernel):
             compact_scales = sidecar.weight_scale.detach()
             compact_alpha = sidecar.weight_global_scale.detach().reshape(())
 
-        layer.register_buffer(
-            "_nvfp4_entry102_workspace", workspace, persistent=False
-        )
+        layer.register_buffer("_nvfp4_entry102_workspace", workspace, persistent=False)
         layer.register_buffer(
             "_nvfp4_entry102_scales", compact_scales, persistent=False
         )
-        layer.register_buffer(
-            "_nvfp4_entry102_alpha", compact_alpha, persistent=False
-        )
+        layer.register_buffer("_nvfp4_entry102_alpha", compact_alpha, persistent=False)
         layer._nvfp4_entry102_scales_valid = workspace is not None
 
     def apply_weights(

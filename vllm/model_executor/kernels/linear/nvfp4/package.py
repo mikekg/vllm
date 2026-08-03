@@ -61,10 +61,16 @@ class NvFp4PackageLinearKernel(NvFp4LinearKernel):
     ) -> torch.Tensor:
         logical_n, logical_k = layer.nvfp4_logical_shape
         output_shape = (*x.shape[:-1], logical_n)
-        x = x.reshape(-1, logical_k)
         padded_k = layer.weight.shape[1] * 2
-        if logical_k != padded_k:
-            x = F.pad(x, (0, padded_k - logical_k))
+        aligned_2d = (
+            x.ndim == 2
+            and x.shape[1] == logical_k == padded_k
+            and logical_n == layer.weight.shape[0]
+        )
+        if not aligned_2d:
+            x = x.reshape(-1, logical_k)
+            if logical_k != padded_k:
+                x = F.pad(x, (0, padded_k - logical_k))
 
         output = torch.ops.nvfp4.nvfp4_linear_w4a16_forward(
             x,
@@ -75,7 +81,9 @@ class NvFp4PackageLinearKernel(NvFp4LinearKernel):
             None,
             0.0,
             False,
-        )[:, :logical_n]
+        )
+        if not aligned_2d:
+            output = output[:, :logical_n]
         if bias is not None:
             output = output + bias
-        return output.reshape(output_shape)
+        return output if aligned_2d else output.reshape(output_shape)

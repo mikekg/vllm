@@ -152,14 +152,26 @@ def restore_marlin_baseline():
     )
     if not callable(original_make_moe_kernel):
         raise RuntimeError("compatibility bootstrap did not expose MoE factory")
-    oracle.make_nvfp4_moe_kernel = original_make_moe_kernel
+
+    def marlin_make_moe_kernel(
+        moe_quant_config, moe_config, experts_cls, routing_tables=None
+    ):
+        return original_make_moe_kernel(
+            moe_quant_config,
+            moe_config,
+            experts_cls,
+            oracle.NvFp4MoeBackend.MARLIN,
+            routing_tables,
+        )
+
+    oracle.make_nvfp4_moe_kernel = marlin_make_moe_kernel
     for name in compat_make_moe_kernel.__globals__["moe_alias_modules"]:
         module = sys.modules.get(name)
         if (
             module is not None
             and getattr(module, "make_nvfp4_moe_kernel", None) is compat_make_moe_kernel
         ):
-            module.make_nvfp4_moe_kernel = original_make_moe_kernel
+            module.make_nvfp4_moe_kernel = marlin_make_moe_kernel
 
 
 def restore_production_knees():

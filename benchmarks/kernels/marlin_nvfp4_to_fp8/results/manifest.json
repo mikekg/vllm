@@ -1,0 +1,367 @@
+{
+  "campaign_files": {
+    "s39_campaign_compare.py": "3274b50b29bd55c39834b4363dc7ff5c098ba0e4035808ac7431b80379c3cccc",
+    "s39_campaign_eval.py": "6d68ed1ff9f3cd93051cc1b5c4091f769a89a2e655531df19a4ad72e61f09de1",
+    "s39_compat_bootstrap.py": "72b4d3a9284b23e8603de6a227a606960759caa0863e88a9dbffaf7453227f0f",
+    "submit_s39_campaign.sh": "fea44bf31d47fc786407013d7653fa7a382be2292ba9fef01b84681ce7bc2a7f"
+  },
+  "campaign_policies": {
+    "aligned_adaptive": {
+      "evidence_job": 6572924,
+      "formula": "D_tile = 768 * 2**j, integer j, smallest D_tile >= exact no-overflow requirement",
+      "rationale": "power-of-two shifts preserve E4M3 mantissa; 768 maps q=6 payload to checkpoint E4M3 scale exactly",
+      "status": "real_layer_nonregression_passed_pending_e2e"
+    },
+    "arbitrary_s0e5m3_adaptive": {
+      "fixed768_gemm_rrms": 0.029158,
+      "fixed768_weight_rrms": 0.013668,
+      "gemm_rrms": 0.033468,
+      "status": "failed_real_checkpoint_nonregression_not_in_campaign",
+      "true_values_above_fp8_max": 0,
+      "weight_rrms": 0.021389
+    },
+    "fixed768_reference": true
+  },
+  "dataset_files": {
+    "test": {
+      "container_path": "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/composite-fix-eeaf7a59/gsm8k-data/test.jsonl",
+      "host_path": "/home/mgschwind/lustre/composite-fix-eeaf7a59/gsm8k-data/test.jsonl",
+      "sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14"
+    },
+    "train": {
+      "container_path": "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/composite-fix-eeaf7a59/gsm8k-data/train.jsonl",
+      "host_path": "/home/mgschwind/lustre/composite-fix-eeaf7a59/gsm8k-data/train.jsonl",
+      "sha256": "17f347dc51477c50d4efb83959dbb7c56297aba886e5544ee2aaed3024813465"
+    }
+  },
+  "evaluation": {
+    "campaign_matrix": {
+      "universal_512_factor_stress": {
+        "models": 4,
+        "runs": 20,
+        "selector": "unmodified universal knee 512; no shape force or table",
+        "variants": [
+          "marlin",
+          "adaptive",
+          "r1",
+          "sqrt6",
+          "r6"
+        ]
+      },
+      "production_normal": {
+        "baseline_reused": "marlin",
+        "models": 4,
+        "new_runs": 4,
+        "selector": "unmodified universal knee 512",
+        "variant": "adaptive_prod"
+      }
+    },
+    "dataset": "GSM8K test",
+    "dtype": "bfloat16",
+    "engine_seed": 0,
+    "execution_mode": "default graph serving path",
+    "identical_across_variants": true,
+    "item_accounting": [
+      "prompt_sha256",
+      "label",
+      "prediction",
+      "correct",
+      "invalid",
+      "completion_tokens",
+      "response_sha256",
+      "response"
+    ],
+    "max_model_len": 2048,
+    "max_num_seqs": 64,
+    "max_tokens": 256,
+    "num_items": 1319,
+    "num_shots": 5,
+    "qwen36_generation_prefix": " <think>\\n\\n</think>\\n",
+    "sampling_seed": 42,
+    "stop": [
+      "Question",
+      "Assistant:",
+      "<|separator|>"
+    ],
+    "temperature": 0
+  },
+  "launch_gate": {
+    "bootstrap_gate_after_q36d_fix": {
+      "job_id": 6573623,
+      "result": "S39_OVERLAY_IMPORT_PASS",
+      "state": "COMPLETED",
+      "status": "passed"
+    },
+    "bootstrap_gate_before_q36d_fix": {
+      "job_id": 6573556,
+      "result": "S39_OVERLAY_IMPORT_PASS",
+      "state": "COMPLETED",
+      "status": "superseded_by_source_fix"
+    },
+    "final_stable_bootstrap_manifest": {
+      "job_id": 6574664,
+      "result": "stable SHA and exact overlay manifest passed",
+      "state": "COMPLETED",
+      "status": "passed"
+    },
+    "final_stable_build": {
+      "job_id": 6574406,
+      "sha256": "bb42106a78fc56e22f2ae648a566b013474497734974d8dd6591d61b4e6e2efc",
+      "state": "COMPLETED",
+      "status": "passed"
+    },
+    "native_k64_k192": {
+      "job_id": 6574407,
+      "result": "exact payload, zero tail, scales, and canaries passed",
+      "state": "COMPLETED",
+      "status": "passed"
+    },
+    "full_launch_allowed": true,
+    "launcher_requires_environment": "S39_FULL_CAMPAIGN_GO=1",
+    "required": [
+      "compiler and production gates pass on the exact current implementation",
+      "coherent universal-512 graph smoke on all four pinned models with fresh caches",
+      "exact current source overlay and ABI binary hashes verified"
+    ],
+    "final_universal_512_all_model_smokes": {
+      "status": "passed",
+      "jobs": {
+        "llama": 6574786,
+        "q36m": 6574787,
+        "q3m": 6574788,
+        "q36d": 6574789
+      },
+      "result": "all four fresh-cache graph smokes completed 0, correct 1/1, invalid 0"
+    },
+    "marlin_backend_restore_gate": {
+      "job_id": 6573648,
+      "result": "S39_CAMPAIGN_BOOTSTRAP_PASS marlin",
+      "state": "COMPLETED",
+      "status": "passed"
+    },
+    "final_production": {
+      "status": "passed",
+      "job_id": 6574754,
+      "result": "dense and MoE nondefault streams, graph replays, and stable pointers passed"
+    },
+    "final_compiler": {
+      "status": "passed",
+      "job_id": 6574758,
+      "result": "FP16 and BF16 composite functionalization passed"
+    },
+    "final_silu_tail": {
+      "status": "passed",
+      "job_id": 6574782,
+      "result": "K192/N192 stream, graph, arena, and zero-tail passed"
+    },
+    "final_gelu_tail": {
+      "status": "passed",
+      "job_id": 6574781,
+      "result": "N64 stream, graph, arena, and zero-tail passed"
+    }
+  },
+  "models": {
+    "llama": {
+      "container_path": "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/composite-fix-eeaf7a59/models/llama",
+      "host_path": "/home/mgschwind/lustre/composite-fix-eeaf7a59/models/llama",
+      "metadata_sha256": {
+        "config.json": "8d78feed8bc0c2b05e11769b809373ffb3c7581cbd5fef871ae83aac7d7961ab",
+        "model.safetensors.index.json": "38875c9f2dc467ab8c6c15310394539fcd7fc810623ed515561b0af6a0621f76",
+        "quantization_config.json": "c41de6c475d168c19140500a9ab677140a1e272548fe09406802db43b54aae74",
+        "tokenizer_config.json": "e29fb6fc246a9769e0e5ae07c353ec096130d591e30d75bba68981dd52136ffe"
+      },
+      "model_id": "parasail-ai/Llama-3.1-8B-Instruct-NVFP4A16",
+      "qwen36_prefix": false,
+      "revision": "166764ea0872b41d3253efae3639367edf055906"
+    },
+    "q36d": {
+      "container_path": "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/composite-fix-eeaf7a59/models/q36d",
+      "host_path": "/home/mgschwind/lustre/composite-fix-eeaf7a59/models/q36d",
+      "metadata_sha256": {
+        "config.json": "c04a19ba293737ad7be4f6e96d6666cb7e479cbe19ecc0c289fad267135b0338",
+        "hf_quant_config.json": "fd7200cd8bca2a8a5d777061521abf83e2deb97ab6bc2f04e7a0a3d3f8ecd5c1",
+        "model.safetensors.index.json": "7aa103a2582b7d26631988de33dea19e8a308ee9c239e8e14feb374af30905e2",
+        "tokenizer_config.json": "5186f0defcd7f232382c7f0aebcd2252d073bb921ab240e407b7ae8745d2b29b"
+      },
+      "model_id": "nvidia/Qwen3.6-27B-NVFP4",
+      "qwen36_prefix": true,
+      "revision": "0893e1606ff3d5f97a441f405d5fc541a6bdf404"
+    },
+    "q36m": {
+      "container_path": "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/composite-fix-eeaf7a59/models/q36m",
+      "host_path": "/home/mgschwind/lustre/composite-fix-eeaf7a59/models/q36m",
+      "metadata_sha256": {
+        "config.json": "58aefa1c9eff7989f431d748f2ddec39446cb1fd2a69acc46e285c6a37b0cecc",
+        "hf_quant_config.json": "75fe7cc8d5836b58734e05ee67423a4ce91d602aaad45c8173a1b7597cd57663",
+        "model.safetensors.index.json": "d67403a4e9793c0ba8a136baf14b3b76ec7b32c822267978084895e07ebd8a3e",
+        "tokenizer_config.json": "5186f0defcd7f232382c7f0aebcd2252d073bb921ab240e407b7ae8745d2b29b"
+      },
+      "model_id": "nvidia/Qwen3.6-35B-A3B-NVFP4",
+      "qwen36_prefix": true,
+      "revision": "491c2f1ea524c639598bf8fa787a93fed5a6fbce"
+    },
+    "q3m": {
+      "container_path": "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/composite-fix-eeaf7a59/models/q3m",
+      "host_path": "/home/mgschwind/lustre/composite-fix-eeaf7a59/models/q3m",
+      "metadata_sha256": {
+        "config.json": "90109beb0f2f221a332de800d8876571cb03eefb00dfdde7498e329aa87bc276",
+        "model.safetensors.index.json": "6b42a6fc5afe993439ee5120300c4cdd3b48f561b7e8c587d0d1aaf2c4289e9b",
+        "tokenizer_config.json": "4b5f2f80f84faefe8420e1616671adb1dd3d7e632038d34b1f0e3a1363a51059"
+      },
+      "model_id": "Benasd/Qwen3-30B-A3B-Instruct-2507-NVFP4A16",
+      "qwen36_prefix": false,
+      "revision": "d3273f65a140017763d977132f187cbb75984587"
+    }
+  },
+  "prepared_at_utc": "2026-08-14T06:01:20.315627+00:00",
+  "product_files_modified": false,
+  "runtime": {
+    "abi_so": {
+      "bound_path": "/usr/local/lib/python3.12/dist-packages/vllm/_C_stable_libtorch.abi3.so",
+      "container_artifact_path": "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/composite-fix-eeaf7a59/final-afe5b8aa-9491805d/artifacts/build-stable-only-r3/_C_stable_libtorch.abi3.so",
+      "path": "/home/mgschwind/lustre/composite-fix-eeaf7a59/final-afe5b8aa-9491805d/artifacts/build-stable-only-r3/_C_stable_libtorch.abi3.so",
+      "sha256": "bb42106a78fc56e22f2ae648a566b013474497734974d8dd6591d61b4e6e2efc",
+      "status": "all build, native, compiler, fused-tail, production, and four-model gates passed"
+    },
+    "converter_so": {
+      "path": "/home/mgschwind/lustre/composite-fix-eeaf7a59/final-afe5b8aa-9491805d/artifacts/build-converter/s39_final_afe5b8aa_vllm024.so",
+      "sha256": "2609b524121436d9a44ea8d78faa7329172eb114a240df44662421671e236ffc",
+      "status": "converter rebuild job6574154 passed; not the campaign ABI"
+    },
+    "compatibility_bootstrap": {
+      "path": "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/s39-quality-campaign/s39_compat_bootstrap.py",
+      "sha256": "72b4d3a9284b23e8603de6a227a606960759caa0863e88a9dbffaf7453227f0f"
+    },
+    "account": "sw_aidot",
+    "cluster": "cw-pdx",
+    "constraint": "H100",
+    "cpus_per_task": 16,
+    "full_time_limit": "04:00:00",
+    "gpus_per_job": 1,
+    "image": {
+      "host_path": "/home/mgschwind/lustre/mmpareto/containers/vllm_v0.24.0.sqsh",
+      "sha256": "1c3d978fe21501757d9402517f26a154d37fdb2445e3c56b2c1e539688de9596",
+      "size_bytes": 8126869504
+    },
+    "partition": "interactive",
+    "python": "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/s39-block-bench/.venv-vllm024/bin/python",
+    "qos": "normal",
+    "source_overlay": "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/cudagym/s39-marlin-nvfp4-to-fp8/block-scale-f9197bcc7074/prod-validation-current-1d217203"
+  },
+  "schema_version": 1,
+  "source_tag": "afe5b8aa-9491805d-3376f631-c6bf359b-bb42106a",
+  "source_files": {
+    "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/cudagym/s39-marlin-nvfp4-to-fp8/block-scale-f9197bcc7074/prod-validation-current-1d217203/base.py": "086f6d72279e5e2c866a242c2949790daae20208eb9fdfe815c513eaa5f66cb5",
+    "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/cudagym/s39-marlin-nvfp4-to-fp8/block-scale-f9197bcc7074/prod-validation-current-1d217203/fix_functionalization.py": "5534667a6dca64b6bdecf4441d84fd9f8cf149f21fa41f11a59af6620c9525b4",
+    "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/cudagym/s39-marlin-nvfp4-to-fp8/block-scale-f9197bcc7074/prod-validation-current-1d217203/marlin.py": "6dd9892f215049f24bd6479cca32463a6256baba5957b3ed549e35f210502e06",
+    "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/cudagym/s39-marlin-nvfp4-to-fp8/block-scale-f9197bcc7074/prod-validation-current-1d217203/marlin_fp8.py": "3376f631aff962b1cfd12107c4aaaba3e5548875590aa8c7cf2f16e7a901fe02",
+    "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/cudagym/s39-marlin-nvfp4-to-fp8/block-scale-f9197bcc7074/prod-validation-current-1d217203/marlin_utils_fp4.py": "34262c7dc6b40b3c0329fc8d5970cc075db87af49daf35885c3d96ddae2092b6",
+    "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/cudagym/s39-marlin-nvfp4-to-fp8/block-scale-f9197bcc7074/prod-validation-current-1d217203/nvfp4.py": "126b7a2eaeb73b472af0e92f57ffe66e5959e44bade16bd55c22c39c7147abbf",
+    "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/cudagym/s39-marlin-nvfp4-to-fp8/block-scale-f9197bcc7074/prod-validation-current-1d217203/nvfp4_bycopy_moe.py": "c6bf359b1d3f92e786229300be62c7fcb8704af6fbc46d5bdd9b55e378d820d3",
+    "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/cudagym/s39-marlin-nvfp4-to-fp8/block-scale-f9197bcc7074/prod-validation-current-1d217203/nvfp4_utils.py": "cae8eb51a605947491b59e5c609822bb6367407b376f6b61ab33ebb24d4507b7",
+    "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/cudagym/s39-marlin-nvfp4-to-fp8/block-scale-f9197bcc7074/prod-validation-current-1d217203/shared_experts.py": "50438207317adfa3221642d7aa0e0fe746d936b2a081167044e081b50679fe73",
+    "/lustre/fsw/portfolios/sw/projects/sw_aidot/users/mgschwind/cudagym/s39-marlin-nvfp4-to-fp8/block-scale-f9197bcc7074/prod-validation-current-1d217203/workspace.py": "0e3b7a55293039eefd2ea1428b6c0e44698d785476f6de2185e4bf8ab46831ed"
+  },
+  "native_source_files": {
+    "csrc/libtorch_stable/quantization/fused_kernels/fused_silu_mul_block_quant.cu": "9491805d6bd1db6da5d97dc1568faf46ad6788f475e863f9952d7179340f44c0",
+    "csrc/libtorch_stable/quantization/marlin/marlin_nvfp4_to_fp8.cu": "afe5b8aa939894a81b6081ebadfed6a0995726ac075c29a9fb22f8ede16b0242"
+  },
+  "status": "full_campaign_pass",
+  "validation": {
+    "dense_contract_missing_has_bias": {
+      "result": "1 passed",
+      "test": "tests/quantization/test_modelopt.py::test_nvfp4_bycopy_dense_uses_block_fp8_contract",
+      "test_file_sha256": "c6f06d46e7dc8aa5a6b9b826c1a8a27cd2c9f13129e9c3969dfda53ed11db3ce"
+    },
+    "moe_generic_tail": {
+      "result": "9 passed, 1 expected SM90 skip",
+      "test": "tests/kernels/moe/test_nvfp4_bycopy_moe.py",
+      "test_file_sha256": "f70680d431637b079db63b73285c133f4cc835e09c6d262bc5cbb06441d67ffa"
+    },
+    "fused_silu_tail": {
+      "job_id": 6574663,
+      "result": "FP16 and BF16 exact bytes/scales versus zero-padded full-size kernel passed",
+      "status": "passed",
+      "test": "tests/kernels/core/test_fused_silu_mul_block_quant.py::test_silu_and_mul_per_block_quant_zero_pads_partial_group",
+      "test_file_sha256": "38a0a4af754653981c1b808c38edf16d703581f136221809f6859a7633a2a931"
+    },
+    "ruff_0_14": "check_and_format_passed",
+    "authoritative_overlay_manifest_sha256": "5fc44bbed20306d5f364f8e0c13ac67e2b57857f81bc51930523a3a9a54e2b4f",
+    "authoritative_overlay_status": "passed final source sync and H100 gates",
+    "marlin_control_factory": {
+      "status": "pass",
+      "smoke_jobs": [
+        6576151,
+        6576153
+      ],
+      "full_jobs": [
+        6576175,
+        6576177
+      ],
+      "detail": "legacy caller adapted to explicit MARLIN backend"
+    },
+    "full_campaign": {
+      "status": "pass",
+      "completed_runs": 24,
+      "items_per_run": 1319,
+      "total_items": 31656,
+      "pair_accounting_sha256": "cfcda6f58f719b30625b22376e14475d5ccead763756e6124b08e934800a9b6b",
+      "marlin_correct": 4528,
+      "adaptive_prod_correct": 4525,
+      "aggregate_delta_correct": -3,
+      "aggregate_delta_percentage_points": -0.056861
+    }
+  },
+  "variants": {
+    "adaptive": {
+      "formula": "768 * 2**j for integer j",
+      "mode": "aligned_adaptive",
+      "policy": "aligned_universal512_factor_stress",
+      "selector": "universal_512"
+    },
+    "adaptive_prod": {
+      "formula": "768 * 2**j for integer j",
+      "mode": "aligned_adaptive",
+      "policy": "aligned_universal512_production_normal",
+      "selector": "universal_512_production_normal"
+    },
+    "marlin": {
+      "code": null,
+      "divisor": null,
+      "mode": "baseline_control",
+      "selector": "marlin",
+      "target_r": null
+    },
+    "r1": {
+      "code": "0xb0",
+      "decoded_divisor": 128,
+      "decoded_r": 1,
+      "mode": "fixed",
+      "policy": "experimental_below_fixed768_floor",
+      "selector": "universal_512",
+      "target_divisor": 128,
+      "target_r": 1
+    },
+    "r6": {
+      "code": "0xc4",
+      "decoded_divisor": 768,
+      "decoded_r": 6,
+      "mode": "fixed",
+      "policy": "required_fixed768_floor",
+      "selector": "universal_512",
+      "target_divisor": 768,
+      "target_r": 6
+    },
+    "sqrt6": {
+      "code": "0xba",
+      "decoded_divisor": 320,
+      "decoded_r": 2.5,
+      "mode": "fixed",
+      "note": "S0E5M3 upward encoding of requested sqrt(6) target",
+      "policy": "experimental_below_fixed768_floor",
+      "selector": "universal_512",
+      "requested_target_divisor": 313.53468707624677,
+      "requested_target_r": 2.449489742783178
+    }
+  }
+}

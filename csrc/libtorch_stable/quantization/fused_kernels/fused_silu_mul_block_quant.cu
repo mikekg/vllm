@@ -6,6 +6,8 @@
 #include "../../dispatch_utils.h"
 #include "quant_conversions.cuh"
 
+#include <limits>
+
 namespace vllm {
 
 // Logic: one thread block per (token, group) pair
@@ -20,8 +22,7 @@ __global__ void silu_and_mul_per_block_quant_kernel(
                                  // num_tokens]
     scalar_t const* __restrict__ input,  // Input: [num_tokens, hidden_size * 2]
     float const* scale_ub,               // Optional scale upper bound
-    int32_t const hidden_size  // Output hidden size (input is 2x this)
-) {
+    int32_t const logical_hidden_size, int32_t const output_hidden_size) {
   static_assert((group_size & (group_size - 1)) == 0,
                 "group_size must be a power of 2 for correct reduction");
 
@@ -32,14 +33,16 @@ __global__ void silu_and_mul_per_block_quant_kernel(
   int const num_tokens = gridDim.x;
 
   // Input layout: [gate || up] concatenated along last dimension
-  int const input_stride = hidden_size * 2;
+  int const input_stride = logical_hidden_size * 2;
   int const group_start = group_idx * group_size;
+  int const element_idx = group_start + tid;
 
   // Pointers to this token's data
   scalar_t const* token_input_gate =
       input + token_idx * input_stride + group_start;
-  scalar_t const* token_input_up = token_input_gate + hidden_size;
-  scalar_out_t* token_output = out + token_idx * hidden_size + group_start;
+  scalar_t const* token_input_up = token_input_gate + logical_hidden_size;
+  scalar_out_t* token_output =
+      out + token_idx * output_hidden_size + group_start;
 
   // Scale pointer for this group
   int const num_groups = gridDim.y;
@@ -51,8 +54,12 @@ __global__ void silu_and_mul_per_block_quant_kernel(
   __shared__ float shared_max[group_size];
 
   // Step 1: Each thread loads one element, computes SiLU, stores in register
-  float gate = static_cast<float>(token_input_gate[tid]);
-  float up = static_cast<float>(token_input_up[tid]);
+  float gate = 0.0f;
+  float up = 0.0f;
+  if (element_idx < logical_hidden_size) {
+    gate = static_cast<float>(token_input_gate[tid]);
+    up = static_cast<float>(token_input_up[tid]);
+  }
 
   // Compute SiLU(gate) * up
   float sigmoid_gate = 1.0f / (1.0f + expf(-gate));
@@ -129,14 +136,39 @@ void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
     STD_TORCH_CHECK(out.scalar_type() == kFp8Type);
   }
 
-  int32_t hidden_size = out.size(-1);
+  STD_TORCH_CHECK(out.dim() == 2 && input.dim() == 2 && scales.dim() == 2,
+                  "out, input, and scales must be rank 2");
+  STD_TORCH_CHECK(input.size(-1) % 2 == 0, "input last dim must be even");
+  int64_t logical_hidden_size_64 = input.size(-1) / 2;
+  int64_t output_hidden_size_64 = out.size(-1);
+  int64_t expected_output_size =
+      (logical_hidden_size_64 + group_size - 1) / group_size * group_size;
+  STD_TORCH_CHECK(
+      logical_hidden_size_64 > 0 &&
+          logical_hidden_size_64 <= std::numeric_limits<int32_t>::max() &&
+          output_hidden_size_64 <= std::numeric_limits<int32_t>::max(),
+      "hidden dimensions must fit int32");
+  STD_TORCH_CHECK(output_hidden_size_64 == expected_output_size,
+                  "output hidden_size must round input hidden_size up to "
+                  "group_size");
+  STD_TORCH_CHECK(out.size(0) == input.size(0),
+                  "out and input token counts must match");
+  int32_t logical_hidden_size = logical_hidden_size_64;
+  int32_t output_hidden_size = output_hidden_size_64;
   auto num_tokens = input.size(0);
-  int32_t num_groups = hidden_size / group_size;
-
-  STD_TORCH_CHECK(input.size(-1) == hidden_size * 2,
-                  "input last dim must be 2x output hidden_size");
-  STD_TORCH_CHECK(hidden_size % group_size == 0,
-                  "hidden_size must be divisible by group_size");
+  int32_t num_groups = output_hidden_size / group_size;
+  if (is_scale_transposed) {
+    STD_TORCH_CHECK(scales.numel() == num_tokens * num_groups,
+                    "transposed scales must contain num_tokens * num_groups "
+                    "values");
+  } else {
+    STD_TORCH_CHECK(
+        scales.size(0) == num_tokens && scales.size(1) == num_groups,
+        "scales must have shape [num_tokens, num_groups]");
+  }
+  STD_TORCH_CHECK(out.get_device_index() == input.get_device_index() &&
+                      scales.get_device_index() == input.get_device_index(),
+                  "out, input, and scales must be on the same device");
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -165,7 +197,7 @@ void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
                               scale_ub.has_value()
                                   ? scale_ub->const_data_ptr<float>()
                                   : nullptr,
-                              hidden_size);
+                              logical_hidden_size, output_hidden_size);
                     });
               });
             });

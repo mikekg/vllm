@@ -1157,6 +1157,41 @@ def gptq_marlin_repack(
     )
 
 
+def marlin_nvfp4_to_fp8(
+    fp8_out: torch.Tensor,
+    scale_out: torch.Tensor,
+    packed_weight: torch.Tensor,
+    processed_block_scales: torch.Tensor,
+    processed_global_scale: torch.Tensor,
+    tile_scale_divisor_codes: torch.Tensor,
+    resident_dtype: torch.dtype,
+) -> None:
+    torch.ops._C.marlin_nvfp4_to_fp8(
+        fp8_out,
+        scale_out,
+        packed_weight,
+        processed_block_scales,
+        processed_global_scale,
+        tile_scale_divisor_codes,
+        resident_dtype,
+    )
+
+
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "marlin_nvfp4_to_fp8"):
+
+    @register_fake("_C::marlin_nvfp4_to_fp8")
+    def _marlin_nvfp4_to_fp8_fake(
+        fp8_out: torch.Tensor,
+        scale_out: torch.Tensor,
+        packed_weight: torch.Tensor,
+        processed_block_scales: torch.Tensor,
+        processed_global_scale: torch.Tensor,
+        tile_scale_divisor_codes: torch.Tensor,
+        resident_dtype: torch.dtype,
+    ) -> None:
+        return None
+
+
 if hasattr(torch.ops._C, "gptq_marlin_repack"):
 
     @register_fake("_C::gptq_marlin_repack")

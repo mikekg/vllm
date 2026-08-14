@@ -23,6 +23,8 @@ from vllm.config.kernel import KernelConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
+    MarlinNvFp4LinearKernel,
+    MarlinNvFp4ToFp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
@@ -428,6 +430,15 @@ def test_compressed_tensors_nvfp4(args, dist_init, workspace_init):
     assert isinstance(qkv_proj.scheme, CompressedTensorsW4A4Fp4)
     assert qkv_proj.scheme.use_a16 == use_a16
     assert qkv_proj.scheme.group_size == 16
+    if use_a16:
+        expected = (
+            MarlinNvFp4ToFp8LinearKernel
+            if MarlinNvFp4ToFp8LinearKernel.is_supported()[0]
+            else MarlinNvFp4LinearKernel
+        )
+        assert isinstance(qkv_proj.scheme.kernel, expected)
+    else:
+        assert not isinstance(qkv_proj.scheme.kernel, MarlinNvFp4ToFp8LinearKernel)
 
 
 @pytest.mark.skipif(

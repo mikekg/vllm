@@ -140,7 +140,18 @@ class WorkspaceManager:
             for i in range(len(shapes_and_dtypes))
         ]
 
-    def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
+    def reserve_for_all_ubatches(self, required_bytes: int) -> None:
+        """Reserve bytes for every ubatch in the current workspace lane."""
+        if isinstance(required_bytes, bool) or not isinstance(required_bytes, int):
+            raise TypeError("required_bytes must be an integer")
+        if required_bytes < 0:
+            raise ValueError("required_bytes must be non-negative")
+        for ubatch_id in range(self._num_ubatches):
+            self._ensure_workspace_size(required_bytes, ubatch_id)
+
+    def _ensure_workspace_size(
+        self, required_bytes: int, ubatch_id: int | None = None
+    ) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.
 
         Args:
@@ -149,7 +160,8 @@ class WorkspaceManager:
         Returns:
             The current workspace tensor.
         """
-        ubatch_id = dbo_current_ubatch_id()
+        if ubatch_id is None:
+            ubatch_id = dbo_current_ubatch_id()
         lane = _workspace_lane.get()
         if lane >= self._num_lanes:
             raise RuntimeError(
@@ -282,8 +294,7 @@ def lock_workspace() -> None:
     Example:
         # During initialization
         init_workspace_manager(device)
-        reserve_workspace(shape1, dtype1)
-        reserve_workspace(shape2, dtype2)
+        reserve_workspace_for_all_ubatches(required_bytes)
 
         # Lock after warmup/profiling
         lock_workspace()
@@ -291,6 +302,11 @@ def lock_workspace() -> None:
         # Now all get_workspace calls must fit in pre-allocated size
     """
     current_workspace_manager().lock()
+
+
+def reserve_workspace_for_all_ubatches(required_bytes: int) -> None:
+    """Reserve bytes for every ubatch in the current workspace lane."""
+    current_workspace_manager().reserve_for_all_ubatches(required_bytes)
 
 
 def unlock_workspace() -> None:

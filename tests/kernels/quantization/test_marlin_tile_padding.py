@@ -25,6 +25,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_zero_points,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    _nvfp4_tile_scale_divisor_codes,
+    _set_nvfp4_tile_scale_divisor_codes,
     apply_fp4_marlin_linear,
     is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin,
@@ -53,6 +55,43 @@ ODD_SHAPES = [
     (4640, 512),  # Nemotron-Super-120B q_proj shard at TP=4
 ]
 ALIGNED_SHAPES = [(64, 128), (128, 64), (256, 256), (4608, 4096)]
+
+
+def test_nvfp4_tile_scale_divisors_are_exponent_aligned_and_safe():
+    requirements = torch.tensor([0.0, 100.0, 190.0, 200.0, 400.0])
+    scales = (requirements * (7.0 / 12.0)).repeat_interleave(8)
+    scales = scales.expand(128, -1).contiguous()
+    packed_weight = torch.full((128, 320), 0x77, dtype=torch.uint8)
+
+    codes = _nvfp4_tile_scale_divisor_codes(packed_weight, scales, 1.0)
+    decoded = (codes.to(torch.int16) << 7).view(torch.float16).float()
+
+    assert codes.tolist() == [[0x78, 0xB4, 0xB4, 0xBC, 0xC4]]
+    histogram = torch.bincount(codes.flatten().long(), minlength=256)
+    assert histogram[[0x78, 0xB4, 0xBC, 0xC4]].tolist() == [1, 2, 1, 1]
+    nonzero = requirements != 0
+    tile_amax = 6.0 * scales[0].reshape(-1, 8).amax(dim=-1)
+    exact_requirements = 2.0 * tile_amax / 7.0
+    exponents = torch.log2(decoded[0, nonzero] / 768.0)
+    assert torch.equal(exponents, exponents.round())
+    assert torch.all(decoded[0, nonzero] >= exact_requirements[nonzero])
+
+
+def test_nvfp4_tile_scale_divisor_reload_preserves_storage():
+    layer = SimpleNamespace()
+    original = torch.tensor([[0xB4]], dtype=torch.uint8)
+    _set_nvfp4_tile_scale_divisor_codes(layer, "divisor_codes", original)
+    data_ptr = layer.divisor_codes.data_ptr()
+
+    replacement = torch.tensor([[0xC4]], dtype=torch.uint8)
+    _set_nvfp4_tile_scale_divisor_codes(layer, "divisor_codes", replacement)
+
+    assert layer.divisor_codes.data_ptr() == data_ptr
+    assert torch.equal(layer.divisor_codes, replacement)
+    with pytest.raises(ValueError, match="Cannot reload divisor_codes"):
+        _set_nvfp4_tile_scale_divisor_codes(
+            layer, "divisor_codes", torch.ones((2, 1), dtype=torch.uint8)
+        )
 
 
 def _is_tile_aligned(size_n: int, size_k: int) -> bool:

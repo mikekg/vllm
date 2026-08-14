@@ -16,6 +16,7 @@ from tests.quantization.utils import (
     is_quant_method_supported,
     load_model_without_vllm_runner,
 )
+from vllm import envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.model import ModelConfig
 from vllm.forward_context import set_forward_context
@@ -23,6 +24,12 @@ from vllm.model_executor.kernels.linear import (
     FlashInferCuteDslNvFp4W4A16LinearKernel,
     HummingNvFp4LinearKernel,
     MarlinNvFp4LinearKernel,
+    MarlinNvFp4ToFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.nvfp4 import marlin_fp8
+from vllm.model_executor.kernels.linear.nvfp4.marlin_fp8 import (
+    _is_nvfp4_bycopy_layer,
+    _lookup_dense_m_knee,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -34,7 +41,12 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
 )
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    marlin_pad_dim,
+    marlin_permute_bias,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     kFp8StaticTensorSym,
     kMxfp8Dynamic,
     kMxfp8Static,
@@ -609,7 +621,8 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
 @pytest.mark.parametrize(
     ("linear_backend", "kernel_cls"),
     [
-        ("auto", MarlinNvFp4LinearKernel),
+        ("auto", MarlinNvFp4ToFp8LinearKernel),
+        ("marlin", MarlinNvFp4LinearKernel),
         ("humming", HummingNvFp4LinearKernel),
         ("flashinfer_cutedsl", FlashInferCuteDslNvFp4W4A16LinearKernel),
     ],
@@ -625,11 +638,26 @@ def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
         select_linear_kernel,
     )
 
-    if linear_backend != "auto":
+    if linear_backend == "auto":
+        cc = current_platform.get_device_capability()
+        compute_capability = cc.to_int() if cc is not None else None
+        cutedsl_ok, _ = FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported(
+            compute_capability
+        )
+        if compute_capability in (100, 103) and cutedsl_ok:
+            kernel_cls = FlashInferCuteDslNvFp4W4A16LinearKernel
+        else:
+            bycopy_ok, _ = MarlinNvFp4ToFp8LinearKernel.is_supported()
+            if (
+                not bycopy_ok
+                or MarlinNvFp4ToFp8LinearKernel.__name__
+                in envs.VLLM_DISABLED_KERNELS
+            ):
+                kernel_cls = MarlinNvFp4LinearKernel
+    else:
         is_supported, reason = kernel_cls.is_supported()
         if not is_supported:
             pytest.skip(reason)
-
     vllm_config = VllmConfig()
     vllm_config.kernel_config.linear_backend = linear_backend
     spec = QuantSpec(weight=kNvfp4Static, activation=None)
@@ -678,6 +706,216 @@ def test_modelopt_linear_exposes_humming_layer_attrs(dist_init, monkeypatch):
     linear.has_bias = True
     build(linear)
     assert linear.has_bias is True
+
+
+def test_nvfp4_bycopy_knee_is_universal_except_embedding_types():
+    assert _lookup_dense_m_knee("unknown GPU", torch.float16, (123, 456)) == 512
+    assert _lookup_dense_m_knee("another GPU", torch.bfloat16, (789, 64)) == 512
+
+    embedding = Mock(spec=VocabParallelEmbedding)
+    embedding.__class__ = VocabParallelEmbedding
+    assert _is_nvfp4_bycopy_layer(Mock(spec=[]))
+    assert not _is_nvfp4_bycopy_layer(embedding)
+    assert not _is_nvfp4_bycopy_layer(_mock_lm_head())
+
+
+def test_nvfp4_bycopy_production_selection_stays_hopper_only():
+    assert MarlinNvFp4ToFp8LinearKernel.is_supported(89) == (
+        False,
+        "Marlin NVFP4-to-FP8 requires Hopper",
+    )
+
+
+def test_nvfp4_bycopy_k64_pads_scratch_without_fallback(monkeypatch):
+    with (
+        patch.object(
+            MarlinNvFp4ToFp8LinearKernel,
+            "is_supported",
+            return_value=(True, None),
+        ),
+        patch.object(marlin_fp8, "QuantFP8"),
+    ):
+        kernel = MarlinNvFp4ToFp8LinearKernel(Mock())
+
+    layer = Mock(spec=[])
+    layer.output_size_per_partition = 128
+    layer.input_size_per_partition = 64
+    layer.weight = torch.empty((4, 256), dtype=torch.int32)
+    layer.params_dtype = torch.bfloat16
+    kernel.marlin.process_weights_after_loading = Mock()
+    reserve = Mock()
+    monkeypatch.setattr(marlin_fp8, "marlin_repacked_nk", lambda *args: (128, 64))
+    monkeypatch.setattr(marlin_fp8.current_platform, "get_device_name", Mock())
+    monkeypatch.setattr(marlin_fp8, "reserve_workspace_for_all_ubatches", reserve)
+
+    kernel.process_weights_after_loading(layer)
+
+    assert kernel.resident_k == 64
+    assert kernel.padded_k == 128
+    assert kernel.m_knee == 512
+    reserve.assert_called_once_with(128 * 128 + 256)
+
+
+def test_nvfp4_bycopy_dense_uses_block_fp8_contract(monkeypatch):
+    with (
+        patch.object(
+            MarlinNvFp4ToFp8LinearKernel,
+            "is_supported",
+            return_value=(True, None),
+        ),
+        patch.object(
+            MarlinNvFp4LinearKernel, "is_supported", return_value=(True, None)
+        ),
+        patch.object(marlin_fp8, "QuantFP8") as quant_cls,
+    ):
+        kernel = MarlinNvFp4ToFp8LinearKernel(Mock())
+
+    quant_cls.assert_called_once_with(
+        static=False,
+        group_shape=GroupShape(1, 128),
+        column_major_scales=True,
+        use_ue8m0=False,
+    )
+
+    kernel.m_knee = 1
+    kernel.logical_n, kernel.logical_k = 64, 192
+    kernel.padded_n, kernel.padded_k = 128, 256
+    fp8_weight = torch.empty((128, 256), dtype=torch.float8_e4m3fn)
+    weight_scale = torch.empty((1, 2), dtype=torch.float32)
+    workspace = Mock()
+    workspace.get_simultaneous.return_value = (fp8_weight, weight_scale)
+    monkeypatch.setattr(marlin_fp8, "current_workspace_manager", lambda: workspace)
+
+    quantized = torch.empty((2, 256), dtype=torch.float8_e4m3fn)
+    activation_scale = torch.empty((2, 2), dtype=torch.float32)
+    kernel.quant_fp8.return_value = (quantized, activation_scale)
+    composite = Mock(return_value=torch.zeros((2, 128), dtype=torch.bfloat16))
+    monkeypatch.setattr(
+        torch.ops.vllm,
+        "marlin_nvfp4_to_fp8_block_scaled_mm",
+        composite,
+    )
+
+    layer = Mock(spec=[])
+    layer.weight = torch.empty((16, 256), dtype=torch.int32)
+    layer.weight_scale = torch.empty((16, 128), dtype=torch.float8_e4m3fn)
+    layer.weight_global_scale = torch.ones((), dtype=torch.float32)
+    layer.weight_fp8_scale_divisor_code = torch.ones((1, 2), dtype=torch.uint8)
+    layer.params_dtype = torch.bfloat16
+    x = torch.ones((2, 192), dtype=torch.bfloat16)
+
+    bias = torch.arange(64, dtype=torch.bfloat16)
+    output = kernel.apply_weights(layer, x, bias)
+
+    workspace.get_simultaneous.assert_called_once_with(
+        ((128, 256), torch.float8_e4m3fn), ((1, 2), torch.float32)
+    )
+    padded_x = kernel.quant_fp8.call_args.args[0]
+    assert padded_x.shape == (2, 256)
+    assert torch.equal(padded_x[:, :192], x)
+    assert not torch.count_nonzero(padded_x[:, 192:])
+    composite.assert_called_once_with(
+        fp8_weight,
+        weight_scale,
+        layer.weight,
+        layer.weight_scale,
+        layer.weight_global_scale,
+        layer.weight_fp8_scale_divisor_code,
+        torch.bfloat16,
+        quantized,
+        activation_scale,
+        torch.bfloat16,
+    )
+    assert output.shape == (2, 64)
+    assert torch.equal(output, bias.expand_as(output))
+
+
+def test_nvfp4_bycopy_preserves_public_skip_bias_add(monkeypatch, default_vllm_config):
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
+    )
+    layer = ReplicatedLinear(
+        192,
+        64,
+        bias=True,
+        skip_bias_add=True,
+        params_dtype=torch.bfloat16,
+        disable_tp=True,
+    )
+    layer.input_size_per_partition = 192
+    layer.output_size_per_partition = 64
+    logical_bias = torch.arange(64, dtype=torch.bfloat16)
+    layer.bias.data.copy_(logical_bias)
+
+    with patch.object(
+        MarlinNvFp4ToFp8LinearKernel, "is_supported", return_value=(True, None)
+    ):
+        kernel = MarlinNvFp4ToFp8LinearKernel(Mock())
+
+    def prepare_marlin(candidate):
+        candidate.bias = torch.nn.Parameter(
+            marlin_permute_bias(marlin_pad_dim(candidate.bias, 64, 128)),
+            requires_grad=False,
+        )
+
+    kernel.marlin.process_weights_after_loading = prepare_marlin
+    monkeypatch.setattr(marlin_fp8, "marlin_repacked_nk", lambda *args: (128, 256))
+    monkeypatch.setattr(
+        marlin_fp8, "reserve_workspace_for_all_ubatches", lambda *args: None
+    )
+    kernel.process_weights_after_loading(layer)
+
+    class SkipBiasMethod:
+        @staticmethod
+        def apply(candidate, x, bias):
+            assert candidate is layer
+            assert bias is None
+            return torch.zeros((*x.shape[:-1], 64), dtype=x.dtype)
+
+    layer.quant_method = SkipBiasMethod()
+    output, output_bias = layer(torch.ones((2, 192), dtype=torch.bfloat16))
+
+    assert not torch.count_nonzero(output)
+    assert output_bias is layer.bias
+    assert torch.equal(output_bias, logical_bias)
+
+    kernel.m_knee = 512
+    kernel.marlin.apply_weights = Mock(return_value=output)
+    x = torch.ones((1, 192), dtype=torch.bfloat16)
+    kernel.apply_weights(layer, x, layer.bias)
+    cached_marlin_bias = layer._marlin_nvfp4_bias
+    kernel.apply_weights(layer, x, layer.bias)
+    expected_marlin_bias = marlin_permute_bias(marlin_pad_dim(logical_bias, 64, 128))
+    assert kernel.marlin.apply_weights.call_count == 2
+    for call in kernel.marlin.apply_weights.call_args_list:
+        assert call.args[2] is cached_marlin_bias
+        assert torch.equal(call.args[2], expected_marlin_bias)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_modelopt_w4a16_can_disable_nvfp4_bycopy(monkeypatch):
+    from vllm.config.quantization import QuantSpec
+    from vllm.model_executor.layers.quantization.modelopt import (
+        RuntimeDtypes,
+        select_linear_kernel,
+    )
+
+    monkeypatch.setattr(
+        "vllm.envs.VLLM_DISABLED_KERNELS",
+        [MarlinNvFp4ToFp8LinearKernel.__name__],
+    )
+    with set_current_vllm_config(VllmConfig()):
+        kernel = select_linear_kernel(
+            QuantSpec(weight=kNvfp4Static, activation=None),
+            MagicMock(),
+            RuntimeDtypes(torch.bfloat16, torch.bfloat16),
+        )
+    assert isinstance(kernel, MarlinNvFp4LinearKernel)
 
 
 @pytest.mark.parametrize(

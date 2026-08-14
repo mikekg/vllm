@@ -159,6 +159,9 @@ from vllm.model_executor.kernels.linear.nvfp4.humming import (
 from vllm.model_executor.kernels.linear.nvfp4.marlin import (
     MarlinNvFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.nvfp4.marlin_fp8 import (
+    MarlinNvFp4ToFp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm import (
     Fp8BlockScaledMMLinearKernel,
     FP8ScaledMMLinearKernel,
@@ -1019,6 +1022,7 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     config = NvFp4LinearLayerConfig()
     a16_kernels = (
         FlashInferCuteDslNvFp4W4A16LinearKernel,
+        MarlinNvFp4ToFp8LinearKernel,
         MarlinNvFp4LinearKernel,
         HummingNvFp4LinearKernel,
     )
@@ -1060,15 +1064,22 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     elif linear_backend == "auto" and use_a16:
         _cc = current_platform.get_device_capability()
         compute_capability = _cc.to_int() if _cc is not None else None
-        # Weight-only: prefer FlashInfer CuTe-DSL W4A16 on SM100/103,
-        # otherwise Marlin.
+        # Prefer FlashInfer CuTe-DSL on SM100/103, then transient FP8 on
+        # Hopper when available, otherwise classic Marlin.
         cutedsl_ok, _ = FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported(
             compute_capability
         )
         if compute_capability in (100, 103) and cutedsl_ok:
             force_kernel = FlashInferCuteDslNvFp4W4A16LinearKernel
         else:
+            bycopy_ok, _ = MarlinNvFp4ToFp8LinearKernel.is_supported()
             force_kernel = MarlinNvFp4LinearKernel
+            if (
+                bycopy_ok
+                and MarlinNvFp4ToFp8LinearKernel.__name__
+                not in envs.VLLM_DISABLED_KERNELS
+            ):
+                force_kernel = MarlinNvFp4ToFp8LinearKernel
 
     if force_kernel is not None:
         if use_a16 and force_kernel not in a16_kernels:
@@ -1254,6 +1265,7 @@ __all__ = [
     "FlashInferTrtllmNvFp4LinearKernel",
     "FlashInferCudnnNvFp4LinearKernel",
     "MarlinNvFp4LinearKernel",
+    "MarlinNvFp4ToFp8LinearKernel",
     "_KernelT",
     "DeepGemmFp8BlockScaledMMKernel",
     "FlashInferFp8DeepGEMMDynamicBlockScaledKernel",

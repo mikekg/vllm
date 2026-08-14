@@ -47,6 +47,7 @@ class NvFp4MoeBackend(Enum):
     FLASHINFER_CUTEDSL_BATCHED = "FLASHINFER_CUTEDSL_BATCHED"
     FLASHINFER_B12X = "FLASHINFER_B12X"
     VLLM_CUTLASS = "VLLM_CUTLASS"
+    MARLIN_FP8_BYCOPY = "MARLIN_FP8_BYCOPY"
     MARLIN = "MARLIN"
     HUMMING = "HUMMING"
     EMULATION = "EMULATION"
@@ -124,6 +125,13 @@ def backend_to_kernel_cls(
 
         return [CutlassExpertsFp4]
 
+    elif backend == NvFp4MoeBackend.MARLIN_FP8_BYCOPY:
+        from vllm.model_executor.layers.fused_moe.experts.nvfp4_bycopy_moe import (
+            NvFp4ByCopyExperts,
+        )
+
+        return [NvFp4ByCopyExperts]
+
     elif backend == NvFp4MoeBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             MarlinExperts,
@@ -199,6 +207,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.VLLM_CUTLASS,
+        NvFp4MoeBackend.MARLIN_FP8_BYCOPY,
         NvFp4MoeBackend.MARLIN,
         NvFp4MoeBackend.HUMMING,
         NvFp4MoeBackend.EMULATION,
@@ -210,6 +219,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_CUTEDSL,
         NvFp4MoeBackend.VLLM_CUTLASS,
+        NvFp4MoeBackend.MARLIN_FP8_BYCOPY,
         NvFp4MoeBackend.MARLIN,
         NvFp4MoeBackend.EMULATION,
         NvFp4MoeBackend.HUMMING,
@@ -445,7 +455,10 @@ def convert_to_nvfp4_moe_kernel_format(
         w2 = layer.w2_weight
         w2_scale = layer.w2_weight_scale
         w2_scale_2 = getattr(layer, "w2_weight_scale_2", None)
-    elif nvfp4_backend == NvFp4MoeBackend.MARLIN:
+    elif nvfp4_backend in (
+        NvFp4MoeBackend.MARLIN_FP8_BYCOPY,
+        NvFp4MoeBackend.MARLIN,
+    ):
         a13_scale = None
         a2_scale = None
         (
@@ -536,9 +549,10 @@ def make_nvfp4_moe_quant_config(
             gemm1_beta=getattr(layer, "swiglu_beta", None),
             gemm1_clamp_limit=swiglu_limit,
         )
-    elif backend == NvFp4MoeBackend.MARLIN or (
-        backend == NvFp4MoeBackend.B12X and use_a16
-    ):
+    elif backend in (
+        NvFp4MoeBackend.MARLIN_FP8_BYCOPY,
+        NvFp4MoeBackend.MARLIN,
+    ) or (backend == NvFp4MoeBackend.B12X and use_a16):
         return nvfp4_w4a16_moe_quant_config(
             g1_alphas=w13_scale_2,
             g2_alphas=w2_scale_2,

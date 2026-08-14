@@ -124,3 +124,66 @@ def test_workspace_lane_validation(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="at least one"):
         workspace.WorkspaceManager(torch.device("cpu"), num_lanes=0)
+
+
+def test_reserve_for_all_ubatches_reuses_aligned_arenas(monkeypatch) -> None:
+    manager = workspace.WorkspaceManager(
+        torch.device("cpu"), num_ubatches=3, num_lanes=2
+    )
+    monkeypatch.setattr(workspace, "_manager", manager)
+
+    with workspace.use_workspace_lane(1):
+        workspace.reserve_workspace_for_all_ubatches(1024)
+        arenas = manager._current_workspaces[1::2].copy()
+
+        assert manager._current_workspaces[::2] == [None, None, None]
+        assert all(arena is not None and arena.numel() == 1024 for arena in arenas)
+
+        workspace.reserve_workspace_for_all_ubatches(512)
+        assert all(
+            manager._current_workspaces[2 * i + 1] is arenas[i]
+            for i in range(len(arenas))
+        )
+
+        for ubatch_id, arena in enumerate(arenas):
+            assert arena is not None
+            monkeypatch.setattr(
+                workspace,
+                "dbo_current_ubatch_id",
+                lambda ubatch_id=ubatch_id: ubatch_id,
+            )
+            first, second = manager.get_simultaneous(
+                ((3, 4), torch.float16), ((5,), torch.int32)
+            )
+            assert first.is_contiguous() and second.is_contiguous()
+            assert first.data_ptr() == arena.data_ptr()
+            assert second.data_ptr() == arena.data_ptr() + 256
+
+
+def test_reservation_and_runtime_growth_reject_only_growth_after_lock(
+    monkeypatch,
+) -> None:
+    manager = workspace.WorkspaceManager(torch.device("cpu"), num_ubatches=2)
+    manager.reserve_for_all_ubatches(512)
+    manager.lock()
+
+    manager.reserve_for_all_ubatches(512)
+    with pytest.raises(AssertionError, match="Workspace is locked"):
+        manager.reserve_for_all_ubatches(513)
+
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 1)
+    (view,) = manager.get_simultaneous(((257,), torch.uint8))
+    assert view.numel() == 257
+    with pytest.raises(AssertionError, match="Workspace is locked"):
+        manager.get_simultaneous(((513,), torch.uint8))
+
+
+def test_reservation_validates_required_bytes() -> None:
+    manager = workspace.WorkspaceManager(torch.device("cpu"))
+
+    with pytest.raises(TypeError, match="must be an integer"):
+        manager.reserve_for_all_ubatches(True)
+    with pytest.raises(TypeError, match="must be an integer"):
+        manager.reserve_for_all_ubatches(1.5)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="must be non-negative"):
+        manager.reserve_for_all_ubatches(-1)

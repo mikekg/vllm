@@ -792,6 +792,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   #
+  # Native Marlin NVFP4-to-FP8 converter
+  #
+  cuda_archs_loose_intersection(
+    MARLIN_NVFP4_TO_FP8_ARCHS "8.9;9.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND
+     MARLIN_NVFP4_TO_FP8_ARCHS)
+    set(MARLIN_NVFP4_TO_FP8_SRC
+      "csrc/libtorch_stable/quantization/marlin/marlin_nvfp4_to_fp8.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${MARLIN_NVFP4_TO_FP8_SRC}"
+      CUDA_ARCHS "${MARLIN_NVFP4_TO_FP8_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${MARLIN_NVFP4_TO_FP8_SRC}")
+    message(STATUS "Building marlin_nvfp4_to_fp8 for archs: "
+                   "${MARLIN_NVFP4_TO_FP8_ARCHS}")
+  else()
+    message(STATUS "Not building marlin_nvfp4_to_fp8 "
+                   "(requires SM89 or SM90 and CUDA >= 12.0)")
+  endif()
+
+  #
   # CUTLASS scaled_mm kernels (moved from _C to _C_stable_libtorch)
   #
   set(SCALED_MM_3X_ARCHS)

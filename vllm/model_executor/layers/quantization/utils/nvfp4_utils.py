@@ -9,6 +9,17 @@ from vllm._custom_ops import (
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
+_NVFP4_TO_FP8_BYCOPY_M_KNEE = 512
+
+
+def _lookup_nvfp4_bycopy_m_knee(
+    device_name: str,
+    dtype: torch.dtype,
+    shape: object,
+) -> int:
+    del device_name, dtype, shape
+    return _NVFP4_TO_FP8_BYCOPY_M_KNEE
+
 
 def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:
     """

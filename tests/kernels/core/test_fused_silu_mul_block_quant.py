@@ -129,6 +129,61 @@ def test_silu_and_mul_per_block_quant(
     )
 
 
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_silu_and_mul_per_block_quant_zero_pads_partial_group(
+    default_vllm_config, dtype: torch.dtype
+) -> None:
+    num_tokens, hidden_size, padded_size, group_size = 3, 192, 256, 128
+    x = torch.randn(num_tokens, hidden_size * 2, dtype=dtype, device="cuda")
+    output = torch.empty(
+        num_tokens,
+        padded_size,
+        dtype=current_platform.fp8_dtype(),
+        device="cuda",
+    )
+    scales = torch.empty(
+        num_tokens, padded_size // group_size, dtype=torch.float32, device="cuda"
+    )
+
+    torch.ops._C.silu_and_mul_per_block_quant(
+        output, x, scales, group_size, None, False
+    )
+
+    gate, up = x.chunk(2, dim=-1)
+    padded_x = torch.cat(
+        (
+            F.pad(gate, (0, padded_size - hidden_size)),
+            F.pad(up, (0, padded_size - hidden_size)),
+        ),
+        dim=-1,
+    )
+    padded_output = torch.empty_like(output)
+    padded_scales = torch.empty_like(scales)
+    torch.ops._C.silu_and_mul_per_block_quant(
+        padded_output, padded_x, padded_scales, group_size, None, False
+    )
+    assert torch.equal(output.view(torch.uint8), padded_output.view(torch.uint8))
+    assert torch.equal(scales, padded_scales)
+
+    activated = F.pad(F.silu(gate) * up, (0, padded_size - hidden_size))
+    ref_output, ref_scales = per_token_group_quant_fp8(
+        activated, group_size=group_size, use_ue8m0=False
+    )
+    assert not output[:, hidden_size:].view(torch.uint8).any()
+    torch.testing.assert_close(scales, ref_scales, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(
+        output.float() * scales.repeat_interleave(group_size, dim=1),
+        ref_output.float() * ref_scales.repeat_interleave(group_size, dim=1),
+        rtol=5e-2,
+        atol=5e-2,
+    )
+    opcheck(
+        torch.ops._C.silu_and_mul_per_block_quant,
+        (output, x, scales, group_size, None, False),
+    )
+
+
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("hidden_size", [4096])
 @pytest.mark.parametrize("num_tokens", [128])

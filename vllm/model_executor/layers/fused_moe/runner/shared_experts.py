@@ -57,6 +57,21 @@ class SharedExperts(torch.nn.Module):
         self._moe_config = moe_config
 
         self._mk_can_overlap_shared_experts = mk_can_overlap_shared_experts
+        self._single_stream_workspace_predicates = [
+            predicate
+            for module in layer.modules()
+            if callable(
+                predicate := getattr(
+                    getattr(
+                        getattr(module, "scheme", None),
+                        "kernel",
+                        getattr(getattr(module, "quant_method", None), "kernel", None),
+                    ),
+                    "requires_single_stream_workspace",
+                    None,
+                )
+            )
+        ]
 
         # Might not be safe to run multi-stream mode if routed and shared experts
         # alias the same inputs
@@ -107,6 +122,12 @@ class SharedExperts(torch.nn.Module):
         hidden_states: torch.Tensor,
     ) -> SharedExpertsOrder:
         if self._disable_shared_experts_overlap:
+            return SharedExpertsOrder.NO_OVERLAP
+
+        m = hidden_states.shape[0]
+        if type(m) is int and any(
+            predicate(m) for predicate in self._single_stream_workspace_predicates
+        ):
             return SharedExpertsOrder.NO_OVERLAP
 
         if self._mk_can_overlap_shared_experts():

@@ -154,6 +154,66 @@ def nvfp4_marlin_process_global_scale(global_scale, a_dtype: torch.dtype | None 
     return global_scale * (2.0 ** (exponent_bias - 7))
 
 
+def _nvfp4_tile_scale_divisor_codes(
+    packed_weight: torch.Tensor,
+    block_scales: torch.Tensor,
+    scale_factor: float,
+) -> torch.Tensor:
+    """Encode one exponent-aligned S0E5M3 divisor per 128x128 weight tile."""
+    assert packed_weight.dtype == torch.uint8
+    n, k = packed_weight.size(-2), packed_weight.size(-1) * 2
+    assert k % 16 == 0
+    assert block_scales.shape == (*packed_weight.shape[:-2], n, k // 16)
+
+    packed_magnitudes = torch.maximum(packed_weight & 0x7, (packed_weight >> 4) & 0x7)
+    magnitude_codes = packed_magnitudes.reshape(
+        *packed_weight.shape[:-2], n, k // 16, 8
+    ).amax(dim=-1)
+    magnitudes = torch.tensor(
+        (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0),
+        dtype=torch.float32,
+        device=packed_weight.device,
+    )
+    group_amax = magnitudes[magnitude_codes.long()] * block_scales.float().abs()
+
+    padded_n, padded_groups = round_up(n, 128), round_up(k // 16, 8)
+    group_amax = torch.nn.functional.pad(
+        group_amax, (0, padded_groups - k // 16, 0, padded_n - n)
+    )
+    tile_amax = group_amax.reshape(
+        *group_amax.shape[:-2], padded_n // 128, 128, padded_groups // 8, 8
+    ).amax(dim=(-3, -1))
+
+    numerator = tile_amax * (2.0 * scale_factor)
+    approximate = (numerator / 7.0).to(torch.float16)
+    codes = approximate.view(torch.int16) >> 7
+    decoded = (codes << 7).view(torch.float16)
+    codes += decoded.float() * 7.0 < numerator
+    mantissa = codes & 7
+    codes = (codes & -8) + 4 + (mantissa > 4) * 8
+    return torch.where(tile_amax == 0, 0x78, codes).to(torch.uint8).contiguous()
+
+
+def _set_nvfp4_tile_scale_divisor_codes(
+    layer: torch.nn.Module, name: str, codes: torch.Tensor
+) -> None:
+    existing = getattr(layer, name, None)
+    if existing is None:
+        setattr(layer, name, codes)
+        return
+    if (
+        existing.shape != codes.shape
+        or existing.dtype != codes.dtype
+        or existing.device != codes.device
+    ):
+        raise ValueError(
+            f"Cannot reload {name}: expected {tuple(existing.shape)}, "
+            f"{existing.dtype}, {existing.device}; got {tuple(codes.shape)}, "
+            f"{codes.dtype}, {codes.device}."
+        )
+    existing.copy_(codes)
+
+
 def apply_fp4_marlin_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -244,6 +304,17 @@ def prepare_fp4_layer_for_marlin(
         device, existing=getattr(layer, "workspace", None)
     )
 
+    scale_factor: float | None = None
+    if is_nvfp4:
+        scale_factor = _nvfp4_compute_scale_factor(layer.weight_scale, param_dtype)
+        _set_nvfp4_tile_scale_divisor_codes(
+            layer,
+            "weight_fp8_scale_divisor_code",
+            _nvfp4_tile_scale_divisor_codes(
+                layer.weight, layer.weight_scale, scale_factor
+            ),
+        )
+
     # WEIGHT
     # Repack weights to marlin format
     perm = torch.empty(0, dtype=torch.int, device=device)
@@ -281,8 +352,9 @@ def prepare_fp4_layer_for_marlin(
     )
 
     if is_nvfp4:
+        assert scale_factor is not None
         weight_scale, scale_factor = nvfp4_marlin_process_scales(
-            weight_scale, a_dtype=param_dtype
+            weight_scale, scale_factor=scale_factor, a_dtype=param_dtype
         )
         layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
 
@@ -403,44 +475,41 @@ def prepare_nvfp4_moe_layer_for_marlin(
     )
     perm = torch.empty(0, dtype=torch.int, device=device)
 
+    assert w13.shape == (E, N * num_shards, K // 2)
+    assert w2.shape == (E, K, N // 2)
+    w13 = pad_w13(w13)
+    w2 = pad_w2(w2, packing=2)
+    w13_scale = pad_w13(w13_scale.to(param_dtype))
+    w2_scale = pad_w2(w2_scale.to(param_dtype), packing=GROUP_SIZE)
+
+    w13_scale_factor = _nvfp4_compute_scale_factor(w13_scale, param_dtype)
+    w2_scale_factor = _nvfp4_compute_scale_factor(w2_scale, param_dtype)
+    _set_nvfp4_tile_scale_divisor_codes(
+        layer,
+        "w13_fp8_scale_divisor_code",
+        _nvfp4_tile_scale_divisor_codes(w13, w13_scale, w13_scale_factor),
+    )
+    _set_nvfp4_tile_scale_divisor_codes(
+        layer,
+        "w2_fp8_scale_divisor_code",
+        _nvfp4_tile_scale_divisor_codes(w2, w2_scale, w2_scale_factor),
+    )
+
     # WEIGHT
     # Repack weights to marlin format
-    def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
-        if "w13" in name:
-            size_n, size_k = N * num_shards, K
-            assert weight.shape == (E, size_n, size_k // 2)
-            weight = pad_w13(weight)
-            size_n = padded_N * num_shards
-        else:
-            size_n, size_k = K, N
-            assert weight.shape == (E, size_n, size_k // 2)
-            weight = pad_w2(weight, packing=2)
-            size_k = padded_N
-
-        return _repack_marlin_experts(weight, size_n, size_k, perm, is_a_8bit)
-
-    w13 = repack_weight(w13, "w13")
-    w2 = repack_weight(w2, "w2")
+    w13 = _repack_marlin_experts(w13, padded_N * num_shards, K, perm, is_a_8bit)
+    w2 = _repack_marlin_experts(w2, K, padded_N, perm, is_a_8bit)
 
     # WEIGHT SCALES
     # Permute scales
     def permute_scales(
-        scales: torch.Tensor, g_scales: torch.Tensor, name: str
+        scales: torch.Tensor,
+        g_scales: torch.Tensor,
+        size_n: int,
+        size_k: int,
+        scale_factor: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        scales = scales.to(param_dtype)
-
         tensor_list = []
-        if "w13" in name:
-            scales = pad_w13(scales)
-            size_n, size_k = padded_N * num_shards, K
-        else:
-            scales = pad_w2(scales, packing=GROUP_SIZE)
-            size_n, size_k = K, padded_N
-
-        # All experts share one global_scale, so compute the max
-        # scale_factor across all experts first, then apply uniformly.
-        combined_scale_factor = _nvfp4_compute_scale_factor(scales, param_dtype)
-
         for i in range(E):
             scale = scales[i].T
             marlin_scales = marlin_permute_scales(
@@ -451,17 +520,25 @@ def prepare_nvfp4_moe_layer_for_marlin(
                 is_a_8bit=is_a_8bit,
             )
             marlin_scales, _ = nvfp4_marlin_process_scales(
-                marlin_scales, scale_factor=combined_scale_factor, a_dtype=param_dtype
+                marlin_scales, scale_factor=scale_factor, a_dtype=param_dtype
             )
             tensor_list.append(marlin_scales)
 
         scales = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
         g_scales = nvfp4_marlin_process_global_scale(g_scales, param_dtype)
-        g_scales = g_scales / combined_scale_factor
+        g_scales = g_scales / scale_factor
         return scales, g_scales
 
-    w13_scale, w13_scale_2 = permute_scales(w13_scale, w13_scale_2, "w13")
-    w2_scale, w2_scale_2 = permute_scales(w2_scale, w2_scale_2, "w2")
+    w13_scale, w13_scale_2 = permute_scales(
+        w13_scale,
+        w13_scale_2,
+        padded_N * num_shards,
+        K,
+        w13_scale_factor,
+    )
+    w2_scale, w2_scale_2 = permute_scales(
+        w2_scale, w2_scale_2, K, padded_N, w2_scale_factor
+    )
 
     return w13, w13_scale, w13_scale_2, w2, w2_scale, w2_scale_2
 

@@ -35,6 +35,14 @@ from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 logger = init_logger(__name__)
 
 
+def _mark_moe_router_gates(model: nn.Module) -> None:
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+
+    for module in model.modules():
+        if isinstance(module, MoERunner) and module.gate is not None:
+            module.gate._vllm_is_moe_router = True
+
+
 @instrument(span_name="Initialize model")
 def initialize_model(
     vllm_config: VllmConfig,
@@ -159,6 +167,8 @@ def process_weights_after_loading(
     # Model-level post-load hook, after the per-layer quant finalize.
     if hasattr(model, "process_weights_after_loading"):
         model.process_weights_after_loading()
+
+    _mark_moe_router_gates(model)
 
     # Needed for torchao model reloading via model.reload_weights
     # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`

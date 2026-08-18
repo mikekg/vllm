@@ -55,6 +55,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.utils import _mark_moe_router_gates
 from vllm.platforms import current_platform
 
 
@@ -714,6 +715,24 @@ def test_nvfp4_bycopy_layer_filter():
     assert not _is_nvfp4_bycopy_layer(_mock_lm_head())
 
 
+def test_model_loader_marks_only_moe_router_gate():
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+
+    model = torch.nn.Module()
+    runner = object.__new__(MoERunner)
+    torch.nn.Module.__init__(runner)
+    runner.gate = torch.nn.Linear(8, 4)
+    runner.shared_expert_gate = torch.nn.Linear(8, 1)
+    model.runner = runner
+    model.unrelated = torch.nn.Linear(8, 4)
+
+    _mark_moe_router_gates(model)
+
+    assert runner.gate._vllm_is_moe_router
+    assert not hasattr(runner.shared_expert_gate, "_vllm_is_moe_router")
+    assert not hasattr(model.unrelated, "_vllm_is_moe_router")
+
+
 def test_nvfp4_bycopy_production_selection_stays_hopper_only():
     assert MarlinNvFp4ToFp8LinearKernel.is_supported(89) == (
         False,
@@ -806,6 +825,28 @@ def test_nvfp4_bycopy_uses_native_hybrid_op(monkeypatch):
     assert args[6:] == (1, False, True)
     assert output.shape == (3, 128)
     assert not torch.count_nonzero(output)
+
+
+def test_nvfp4_bycopy_router_uses_marlin(monkeypatch):
+    kernel = object.__new__(MarlinNvFp4ToFp8LinearKernel)
+    kernel.marlin = Mock()
+    kernel.marlin.apply_weights.return_value = torch.zeros(
+        (3, 128), dtype=torch.bfloat16
+    )
+    kernel.m_knee = 1
+
+    hybrid = Mock()
+    monkeypatch.setattr(marlin_fp8.ops, "marlin_nvfp4_hybrid_linear", hybrid)
+
+    layer = torch.nn.Module()
+    layer._vllm_is_moe_router = True
+    x = torch.ones((3, 256), dtype=torch.bfloat16)
+
+    output = kernel.apply_weights(layer, x)
+
+    kernel.marlin.apply_weights.assert_called_once_with(layer, x, None)
+    hybrid.assert_not_called()
+    assert output.shape == (3, 128)
 
 
 def test_nvfp4_bycopy_preserves_public_skip_bias_add(monkeypatch, default_vllm_config):

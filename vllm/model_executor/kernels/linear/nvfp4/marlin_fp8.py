@@ -109,7 +109,11 @@ class MarlinNvFp4ToFp8LinearKernel(NvFp4LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.m_knee is None or bias is not None:
+        if (
+            self.m_knee is None
+            or bias is not None
+            or getattr(layer, "_vllm_is_moe_router", False)
+        ):
             return self.marlin.apply_weights(layer, x, self._marlin_bias(layer, bias))
 
         x_2d = x.reshape(-1, self.logical_k)

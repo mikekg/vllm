@@ -9,9 +9,6 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    w8a8_triton_block_scaled_mm,
-)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_repacked_nk,
 )
@@ -309,6 +306,58 @@ def test_dense_real_marlin_pack_matches_independent_oracle(
     _assert_canaries(scale_storage)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(90),
+    reason="The specialized converter dispatch requires SM90.",
+)
+@pytest.mark.parametrize("resident_dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    ("n_tiles", "k_tiles"),
+    [(8, 8), (5, 13)],
+    ids=["sparse-max", "paired-min"],
+)
+def test_dense_sm90_dispatch_boundaries_match_independent_oracle(
+    n_tiles: int,
+    k_tiles: int,
+    resident_dtype: torch.dtype,
+) -> None:
+    n, k = 128 * n_tiles, 128 * k_tiles
+    codes = (
+        torch.arange(k, dtype=torch.int32, device="cuda")
+        .remainder_(16)
+        .to(torch.uint8)
+        .expand(n, k)
+    )
+    layer = _dense_marlin_inputs(codes, resident_dtype)
+
+    output, output_scale, weight_storage, scale_storage = _run_converter(
+        layer.weight,
+        layer.weight_scale,
+        layer.weight_global_scale,
+        layer.weight_fp8_scale_divisor_code,
+        resident_dtype,
+    )
+
+    torch.testing.assert_close(
+        output.view(torch.uint8),
+        _expected_weight(
+            codes, layer.weight_scale, layer.weight_fp8_scale_divisor_code
+        ),
+    )
+    torch.testing.assert_close(
+        output_scale,
+        _expected_global_scale(
+            layer.weight_global_scale,
+            resident_dtype,
+            layer.weight_fp8_scale_divisor_code,
+        ),
+        rtol=0,
+        atol=0,
+    )
+    _assert_canaries(weight_storage)
+    _assert_canaries(scale_storage)
+
+
 @pytest.mark.parametrize("resident_dtype", [torch.float16, torch.bfloat16])
 def test_dense_real_marlin_round_trip_reconstructs_checkpoint(
     resident_dtype: torch.dtype,
@@ -380,8 +429,12 @@ def test_dense_partial_k_uses_zero_padded_fp8_scratch(k: int) -> None:
 
 
 @pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(90),
+    reason="The block-scaled CUDA CUTLASS consumer requires SM90.",
+)
 @torch.inference_mode()
-def test_dense_real_marlin_gemm_matches_quant_fp8_triton_consumer() -> None:
+def test_dense_real_marlin_gemm_matches_quant_fp8_cutlass_consumer() -> None:
     n, k, m = 256, 256, 32
     codes, block_scales, global_scale = _exact_dense_checkpoint(n, k)
     layer = _dense_marlin_inputs(
@@ -390,7 +443,7 @@ def test_dense_real_marlin_gemm_matches_quant_fp8_triton_consumer() -> None:
         block_scales,
         global_scale.item(),
     )
-    hidden = torch.randn((m, k), dtype=torch.bfloat16, device="cuda")
+    hidden = torch.randn((m, k + 8), dtype=torch.bfloat16, device="cuda")[:, :k]
 
     marlin = apply_fp4_marlin_linear(
         hidden,
@@ -414,13 +467,12 @@ def test_dense_real_marlin_gemm_matches_quant_fp8_triton_consumer() -> None:
         column_major_scales=True,
         use_ue8m0=False,
     )(hidden)
-    triton = w8a8_triton_block_scaled_mm(
+    cutlass = ops.cutlass_scaled_mm(
         fp8_input,
-        fp8_weight,
-        input_scale,
-        weight_scale,
-        [128, 128],
-        torch.bfloat16,
+        fp8_weight.T,
+        scale_a=input_scale,
+        scale_b=weight_scale.T,
+        out_dtype=torch.bfloat16,
     )
 
     canonical_weight = _canonical_weight(codes, block_scales, global_scale)
@@ -429,13 +481,65 @@ def test_dense_real_marlin_gemm_matches_quant_fp8_triton_consumer() -> None:
         fp8_input.float() * input_scale.float().repeat_interleave(128, dim=-1)[..., :k]
     )
     converted_reference = (converted_input @ converted_weight.T).to(torch.bfloat16)
-    triton_error = (triton.float() - converted_reference.float()).abs().mean()
-    assert triton_error / converted_reference.float().abs().mean() < 0.01
+    cutlass_error = (cutlass.float() - converted_reference.float()).abs().mean()
+    assert cutlass_error / converted_reference.float().abs().mean() < 0.01
 
     canonical_reference = (hidden.float() @ canonical_weight.T).to(torch.bfloat16)
     torch.testing.assert_close(marlin, canonical_reference, rtol=0.01, atol=0.1)
-    conversion_error = (triton.float() - marlin.float()).abs().mean()
+    conversion_error = (cutlass.float() - marlin.float()).abs().mean()
     assert conversion_error / marlin.float().abs().mean() < 0.08
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(90)
+    or not hasattr(torch.ops._C, "marlin_nvfp4_hybrid_linear"),
+    reason="The native hybrid operator requires SM90.",
+)
+def test_native_hybrid_is_functional() -> None:
+    schema = torch.ops._C.marlin_nvfp4_hybrid_linear.default._schema
+    assert all(argument.alias_info is None for argument in schema.arguments)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(90)
+    or not hasattr(torch.ops._C, "marlin_nvfp4_hybrid_linear"),
+    reason="The native hybrid operator requires SM90.",
+)
+@pytest.mark.parametrize(("m", "m_knee"), [(1, 2), (3, 1)])
+@torch.inference_mode()
+def test_native_hybrid_selects_marlin_or_padded_fp8(m: int, m_knee: int) -> None:
+    n = k = 128
+    codes, block_scales, global_scale = _exact_dense_checkpoint(n, k)
+    layer = _dense_marlin_inputs(
+        codes, torch.bfloat16, block_scales, global_scale.item()
+    )
+    hidden = torch.randn((m, k), dtype=torch.bfloat16, device="cuda")
+    reference = apply_fp4_marlin_linear(
+        hidden,
+        layer.weight,
+        layer.weight_scale,
+        layer.weight_global_scale,
+        layer.workspace,
+        n,
+        k,
+    )
+    actual = ops.marlin_nvfp4_hybrid_linear(
+        hidden,
+        layer.weight,
+        layer.weight_scale,
+        layer.weight_global_scale,
+        layer.weight_fp8_scale_divisor_code,
+        layer.workspace,
+        m_knee,
+        False,
+        False,
+    )
+
+    if m < m_knee:
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+    else:
+        error = (actual.float() - reference.float()).abs().mean()
+        assert error / reference.float().abs().mean() < 0.08
 
 
 def test_zero_tile_uses_identity_divisor_without_a_special_runtime_path() -> None:
@@ -508,10 +612,13 @@ def test_zero_group_with_large_scale_stays_zero() -> None:
 
 
 @pytest.mark.parametrize("resident_dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(("experts", "n"), [(3, 64), (2, 128)])
 def test_moe_real_marlin_round_trip_matches_rank3_oracle(
     resident_dtype: torch.dtype,
+    experts: int,
+    n: int,
 ) -> None:
-    experts, n, k = 3, 64, 128
+    k = 128
     generator = torch.Generator(device="cuda").manual_seed(23)
     expert_ids = torch.arange(experts, device="cuda")[:, None, None]
     w13_code_base = (

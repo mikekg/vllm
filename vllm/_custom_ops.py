@@ -1177,6 +1177,30 @@ def marlin_nvfp4_to_fp8(
     )
 
 
+def marlin_nvfp4_hybrid_linear(
+    input: torch.Tensor,
+    packed_weight: torch.Tensor,
+    processed_block_scales: torch.Tensor,
+    processed_global_scale: torch.Tensor,
+    tile_scale_divisor_codes: torch.Tensor,
+    marlin_workspace: torch.Tensor,
+    m_knee: int,
+    use_atomic_add: bool,
+    use_fp32_reduce: bool,
+) -> torch.Tensor:
+    return torch.ops._C.marlin_nvfp4_hybrid_linear(
+        input,
+        packed_weight,
+        processed_block_scales,
+        processed_global_scale,
+        tile_scale_divisor_codes,
+        marlin_workspace,
+        m_knee,
+        use_atomic_add,
+        use_fp32_reduce,
+    )
+
+
 if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "marlin_nvfp4_to_fp8"):
 
     @register_fake("_C::marlin_nvfp4_to_fp8")
@@ -1190,6 +1214,23 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "marlin_nvfp4_to_fp8"):
         resident_dtype: torch.dtype,
     ) -> None:
         return None
+
+
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "marlin_nvfp4_hybrid_linear"):
+
+    @register_fake("_C::marlin_nvfp4_hybrid_linear")
+    def _marlin_nvfp4_hybrid_linear_fake(
+        input: torch.Tensor,
+        packed_weight: torch.Tensor,
+        processed_block_scales: torch.Tensor,
+        processed_global_scale: torch.Tensor,
+        tile_scale_divisor_codes: torch.Tensor,
+        marlin_workspace: torch.Tensor,
+        m_knee: int,
+        use_atomic_add: bool,
+        use_fp32_reduce: bool,
+    ) -> torch.Tensor:
+        return input.new_empty((input.shape[0], processed_block_scales.shape[1]))
 
 
 if hasattr(torch.ops._C, "gptq_marlin_repack"):

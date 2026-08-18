@@ -26,7 +26,6 @@ from vllm.config import (
     get_current_vllm_config,
     set_current_vllm_config,
 )
-from vllm.model_executor.kernels.linear.nvfp4 import marlin_fp8  # noqa: F401
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -38,7 +37,6 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 TEST_FP8 = current_platform.supports_fp8()
 FP8_DTYPE = current_platform.fp8_dtype()
-MARLIN_FP8_COMPOSITE_OP = torch.ops.vllm.marlin_nvfp4_to_fp8_block_scaled_mm
 
 
 class TestSiluMul(torch.nn.Module):
@@ -253,77 +251,6 @@ class TestFunctionWithMutatedArgsAndReturn(torch.nn.Module):
         return []
 
 
-class TestMarlinNvFp4ToFp8BlockScaledMm(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.resident_dtype = torch.get_default_dtype()
-        self.register_buffer(
-            "workspace",
-            torch.empty(128 * 128 + 4, dtype=torch.uint8),
-            persistent=False,
-        )
-
-    def forward(
-        self,
-        first_weight,
-        second_weight,
-        weight_scale,
-        global_scale,
-        tile_scale_divisor_codes,
-        x,
-        activation_scale,
-    ):
-        weight_bytes = 128 * 128
-        output = self.workspace[:weight_bytes].view(torch.float8_e4m3fn).view(128, 128)
-        output_scale = self.workspace[weight_bytes:].view(torch.float32).view(1, 1)
-        first = MARLIN_FP8_COMPOSITE_OP(
-            output,
-            output_scale,
-            first_weight,
-            weight_scale,
-            global_scale,
-            tile_scale_divisor_codes,
-            self.resident_dtype,
-            x,
-            activation_scale,
-            self.resident_dtype,
-        )
-        second = MARLIN_FP8_COMPOSITE_OP(
-            output,
-            output_scale,
-            second_weight,
-            weight_scale,
-            global_scale,
-            tile_scale_divisor_codes,
-            self.resident_dtype,
-            x,
-            activation_scale,
-            self.resident_dtype,
-        )
-        return first, second
-
-    def example_inputs(self):
-        return (
-            torch.full((8, 256), 0x11111111, dtype=torch.int32),
-            torch.full((8, 256), 0x33333333, dtype=torch.int32),
-            torch.ones((8, 128), dtype=torch.float8_e4m3fn),
-            torch.full(
-                (1,),
-                2.0 ** (14 if self.resident_dtype == torch.float16 else 126),
-                dtype=torch.float32,
-            ),
-            torch.full((1, 1), 0x78, dtype=torch.uint8),
-            torch.ones((32, 128), dtype=torch.float8_e4m3fn),
-            torch.ones((1, 32), dtype=torch.float32).T,
-        )
-
-    def ops_in_model(self, do_fusion):
-        return [MARLIN_FP8_COMPOSITE_OP.default]
-
-    def ops_not_in_model(self):
-        return [torch.ops._C.marlin_nvfp4_to_fp8.default]
-
-
 MODELS_AND_DO_FUSION = {
     TestSiluMul: [True, False],
     TestFusedAddRMSNorm: [True, False],
@@ -331,12 +258,6 @@ MODELS_AND_DO_FUSION = {
     TestRotaryEmbeddingSliceScatter: [False],
     TestFunctionWithMutatedArgsAndReturn: [False],
 }
-
-if hasattr(torch.ops._C, "marlin_nvfp4_to_fp8") and (
-    current_platform.is_device_capability(89)
-    or current_platform.is_device_capability(90)
-):
-    MODELS_AND_DO_FUSION[TestMarlinNvFp4ToFp8BlockScaledMm] = [False]
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -399,11 +320,7 @@ def test_fix_functionalization(
         # deepcopy inputs to prevent potential in place mutation
         outputs_func = model_func(*copy.deepcopy(inputs_func))
         outputs_no_func = model_no_func(*copy.deepcopy(inputs_no_func))
-        if isinstance(model, TestMarlinNvFp4ToFp8BlockScaledMm):
-            assert not torch.equal(outputs_no_func[0], outputs_no_func[1])
-            torch.testing.assert_close(outputs_func, outputs_no_func, rtol=0, atol=0)
-        else:
-            torch.testing.assert_close(outputs_func, outputs_no_func)
+        torch.testing.assert_close(outputs_func, outputs_no_func)
 
         # check if the functionalization pass is applied
         for op in model.ops_in_model(do_fusion):

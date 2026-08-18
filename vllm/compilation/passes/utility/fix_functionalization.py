@@ -153,16 +153,6 @@ class FixFunctionalizationPass(VllmInductorPass):
                         "input_global_scale",
                     ),
                 )
-            elif (
-                hasattr(torch.ops.vllm, "marlin_nvfp4_to_fp8_block_scaled_mm")
-                and at_target
-                == torch.ops.vllm.marlin_nvfp4_to_fp8_block_scaled_mm.default
-            ):
-                self.defunctionalize(
-                    graph,
-                    node,
-                    {1: "fp8_weight", 2: "weight_scale"},
-                )
             # Defunctionalize fused_qk_norm_rope to remove higher-order wrapper.
             elif at_target == torch.ops._C.fused_qk_norm_rope.default:
                 mutated_args = {1: "qkv"}

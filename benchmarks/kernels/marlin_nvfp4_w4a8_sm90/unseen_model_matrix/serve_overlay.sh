@@ -36,7 +36,7 @@ mkdir -p "$RESULT_DIR" "$CACHE_ROOT"
 export VLLM_CACHE_ROOT="$CACHE_ROOT"
 export DG_JIT_CACHE_DIR="$CACHE_ROOT/deep_gemm"
 mkdir -p "$DG_JIT_CACHE_DIR"
-client_source=${GSM8K_CLIENT:-${IXBENCH:-}}
+client_source=${GSM8K_CLIENT:-${GSM_FIXED_TIMING_CLIENT:-${IXBENCH:-}}}
 : "${client_source:?benchmark client required}"
 if ((NODE_RANK == 0)); then
   {
@@ -133,6 +133,12 @@ if [[ -n ${GSM8K_CLIENT:-} ]]; then
     gsm+=(--baseline-details "$GSM8K_BASELINE_DETAILS")
   fi
   "${gsm[@]}"
+  exit
+fi
+
+if [[ -n ${GSM_FIXED_TIMING_CLIENT:-} ]]; then
+  export BASE_URL="http://127.0.0.1:$PORT"
+  "$GSM_FIXED_TIMING_CLIENT"
   exit
 fi
 

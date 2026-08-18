@@ -191,6 +191,9 @@ def prepare(args: argparse.Namespace) -> None:
         "request_rate": "inf",
         "temperature": 0,
         "warmup_policy": "2 * max_concurrency",
+        "request_count_policy": (
+            "min(total_requests, max(20, min(3 * max_concurrency, 512)))"
+        ),
         "limitation": (
             "Both twins force a constant output length; natural GSM8K completion "
             "lengths are intentionally not reproduced."
@@ -231,9 +234,9 @@ def checked_result(
     concurrency: int,
 ) -> dict:
     result = json.loads(path.read_text(encoding="utf-8"))
-    count = provenance["num_requests"]
+    count = min(provenance["num_requests"], max(20, min(3 * concurrency, 512)))
     output_tokens = provenance["fixed_output_tokens"]
-    expected_inputs = provenance["prompt_token_lengths"]
+    expected_inputs = provenance["prompt_token_lengths"][:count]
     expected_kind = f"{workload}_fixed_token_timing"
     expected_dataset_sha = provenance["datasets"][workload]["sha256"]
     expected = {
@@ -246,6 +249,7 @@ def checked_result(
         "fixed_output_tokens": str(output_tokens),
         "temperature": "0",
         "num_warmups": str(2 * concurrency),
+        "timing_prompt_count": str(count),
     }
     for key, value in expected.items():
         if result.get(key) != value:
@@ -539,6 +543,7 @@ def self_test() -> None:
                     "fixed_output_tokens": "256",
                     "temperature": "0",
                     "num_warmups": "16",
+                    "timing_prompt_count": "2",
                     "max_concurrency": 8,
                     "num_prompts": 2,
                     "completed": 2,

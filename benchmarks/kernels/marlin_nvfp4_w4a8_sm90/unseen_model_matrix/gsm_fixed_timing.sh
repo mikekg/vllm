@@ -49,11 +49,15 @@ PROVENANCE_SHA=$(sha256sum "$PROVENANCE")
 PROVENANCE_SHA=${PROVENANCE_SHA%% *}
 SOURCE_DETAILS_SHA=$(sha256sum "$GSM8K_DETAILS")
 SOURCE_DETAILS_SHA=${SOURCE_DETAILS_SHA%% *}
-NUM_PROMPTS=$(wc -l <"$GSM_DATASET")
+TOTAL_PROMPTS=$(wc -l <"$GSM_DATASET")
 
 IFS=, read -r -a concurrencies <<<"$CONCS"
 for concurrency in "${concurrencies[@]}"; do
   [[ $concurrency =~ ^[1-9][0-9]*$ ]]
+  num_prompts=$((3 * concurrency))
+  ((num_prompts < 20)) && num_prompts=20
+  ((num_prompts > 512)) && num_prompts=512
+  ((num_prompts > TOTAL_PROMPTS)) && num_prompts=$TOTAL_PROMPTS
   for workload in gsm8k random; do
     if [[ $workload == gsm8k ]]; then
       dataset=$GSM_DATASET
@@ -77,7 +81,7 @@ for concurrency in "${concurrencies[@]}"; do
       --disable-shuffle
       --no-oversample
       --custom-output-len "$OUTPUT_TOKENS"
-      --num-prompts "$NUM_PROMPTS"
+      --num-prompts "$num_prompts"
       --max-concurrency "$concurrency"
       --request-rate inf
       --num-warmups "$((2 * concurrency))"
@@ -100,6 +104,7 @@ for concurrency in "${concurrencies[@]}"; do
       "fixed_output_tokens=$OUTPUT_TOKENS"
       "temperature=0"
       "num_warmups=$((2 * concurrency))"
+      "timing_prompt_count=$num_prompts"
     )
     "${client[@]}" >"$RUN_DIR/${filename%.json}.log" 2>&1
   done

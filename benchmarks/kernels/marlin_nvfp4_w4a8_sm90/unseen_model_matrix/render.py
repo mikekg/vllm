@@ -440,6 +440,82 @@ def render_gsm8k(
     return "\n".join(lines)
 
 
+def render_gsm_fixed_timing(
+    data: dict,
+    run_id: str,
+    overlay: str | None,
+    python: str,
+    output: Path,
+    package: tuple[str, str] | None,
+) -> str:
+    runtime = data["runtime"]
+    matrix = data["matrix"]
+    source = harness(runtime)
+    job_file = f"{source}/unseen_model_once.sbatch"
+    concurrencies = ",".join(map(str, matrix["concurrencies"]))
+    lines = header("gsm_fixed_timing.jobs", package)
+    sequence = (
+        ("native_reference", "a1", "1"),
+        ("adaptive", "b1", "2"),
+        ("native_reference", "a2", "3"),
+    )
+
+    for model in data["models"]:
+        result_root = f"{runtime['results']}/{run_id}/{model['id']}/gsm_fixed_timing"
+        accuracy_root = (
+            f"{runtime['results']}/{run_id}/{model['id']}/gsm8k/native_reference"
+        )
+        for variant, run_label, run_index in sequence:
+            result = f"{result_root}/runs/{run_label}"
+            env = common_env(data, model, variant, overlay, python)
+            env.update(
+                {
+                    "ISL": "1024",
+                    "OSL": "256",
+                    "MML_OVERRIDE": "2048",
+                    "RESULT_DIR": result,
+                    "CACHE_ROOT": f"{result}/cache",
+                    "GSM_FIXED_TIMING_CLIENT": f"{source}/gsm_fixed_timing.sh",
+                    "GSM8K_DETAILS": f"{accuracy_root}/details.jsonl",
+                    "ACCURACY_SUMMARY": f"{accuracy_root}/summary.json",
+                    "RESULT_ROOT": result_root,
+                    "VARIANT": variant,
+                    "RUN_LABEL": run_label,
+                    "RUN_INDEX": run_index,
+                    "BASELINE_VARIANT": "native_reference",
+                    "OUTPUT_TOKENS": "256",
+                    "CONCS": concurrencies,
+                    "SOURCE_REVISION": package[1] if package else "",
+                }
+            )
+            stem = f"{model['id']}-{variant}-gsm-fixed-{run_label}"
+            config_file = (
+                Path("configs") / "gsm_fixed_timing" / model["id"] / f"{run_label}.env"
+            )
+            write_env(output / config_file, env)
+            lines.append('gap=$(gap_after "$job" ' + shlex.quote(stem) + ")")
+            record_gap(lines, f"{stem}-gap-before")
+            lines.append(
+                sbatch(
+                    model,
+                    job_file,
+                    str(config_file),
+                    stem,
+                    (
+                        "03:00:00"
+                        if model["topology"]["nodes"] > 1
+                        or model["topology"]["engine_tp"] >= 8
+                        else "02:00:00"
+                    ),
+                    dependency="gap",
+                )
+            )
+            record(lines, stem)
+        lines.append("")
+    lines.append('printf "tail %s\\n" "$job" >>"$manifest"')
+    return "\n".join(lines)
+
+
 def render_route_diagnostics(
     data: dict,
     run_id: str,
@@ -564,6 +640,7 @@ def main() -> None:
     performance = args.output / "submit_performance.sh"
     performance_high = args.output / "submit_performance_high.sh"
     gsm8k = args.output / "submit_gsm8k.sh"
+    fixed_timing = args.output / "submit_gsm_fixed_timing.sh"
     routes = args.output / "submit_route_diagnostics.sh"
     rendered_performance, rendered_performance_high = render_performance(
         data,
@@ -593,6 +670,18 @@ def main() -> None:
         + "\n",
         encoding="utf-8",
     )
+    fixed_timing.write_text(
+        render_gsm_fixed_timing(
+            data,
+            args.run_id,
+            overlay,
+            python,
+            args.output,
+            package,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     routes.write_text(
         render_route_diagnostics(
             data,
@@ -608,12 +697,14 @@ def main() -> None:
     performance.chmod(0o755)
     performance_high.chmod(0o755)
     gsm8k.chmod(0o755)
+    fixed_timing.chmod(0o755)
     routes.chmod(0o755)
     moe_models = sum("moe_shape" in model for model in data["models"])
     print(
         f"rendered {len(data['models']) * 8} performance and "
         f"{len(data['models']) * 4} high-concurrency and "
         f"{len(data['models']) * 2} GSM8K and "
+        f"{len(data['models']) * 3} fixed-token timing and "
         f"{moe_models * 2} route-diagnostic jobs"
     )
 

@@ -216,8 +216,8 @@ void marlin_nvfp4_hybrid_moe(
     Tensor mm1 = cache13.narrow(0, 0, routes * 2 * n).view({routes, 2 * n});
     call_marlin(hidden_states, mm1, w13, w13_scales, w13_global_scale,
                 marlin_workspace, sorted_token_ids, expert_ids,
-                num_tokens_post_pad, topk_weights, block_size, topk,
-                apply_router_weight_on_input, m, 2 * n, k);
+                num_tokens_post_pad, topk_weights, block_size, topk, false, m,
+                2 * n, k);
     call_boxed(registered_ops().silu, {cache2, mm1});
     Tensor mm2 = cache13.narrow(0, 0, routes * k).view({routes, k});
     call_marlin(cache2, mm2, w2, w2_scales, w2_global_scale, marlin_workspace,

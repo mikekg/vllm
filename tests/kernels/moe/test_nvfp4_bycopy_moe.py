@@ -515,19 +515,8 @@ def test_staged_apply_pads_tails_and_reuses_weight_scratch(
         assert call.kwargs["compute_type"] == compute_type
 
 
-@pytest.mark.skipif(
-    not (
-        current_platform.is_cuda()
-        and current_platform.is_device_capability(90)
-        and hasattr(torch.ops._C, "marlin_nvfp4_to_fp8")
-    ),
-    reason="The staged NVFP4-to-FP8 MoE path requires SM90.",
-)
-@pytest.mark.usefixtures("default_vllm_config")
-def test_real_staged_apply_matches_marlin(monkeypatch):
-    e, m, n, k, topk = 2, 8, 128, 128, 2
+def _real_nvfp4_case(e: int, m: int, n: int, k: int):
     dtype = torch.bfloat16
-    config = _config(e=e, p=n, k=k, topk=topk, dtype=dtype)
     generator = torch.Generator(device="cuda").manual_seed(7)
     w13 = torch.randint(
         0,
@@ -549,8 +538,8 @@ def test_real_staged_apply_matches_marlin(monkeypatch):
         (e, 2 * n, k // 16), dtype=torch.float8_e4m3fn, device="cuda"
     )
     w2_scale = torch.ones((e, k, n // 16), dtype=torch.float8_e4m3fn, device="cuda")
-    w13_global = torch.tensor([2**-4, 2**-3], device="cuda")
-    w2_global = torch.tensor([2**-3, 2**-4], device="cuda")
+    w13_global = torch.tensor([2 ** (-4 + i % 2) for i in range(e)], device="cuda")
+    w2_global = torch.tensor([2 ** (-3 - i % 2) for i in range(e)], device="cuda")
     layer = SimpleNamespace(
         num_experts=e,
         hidden_size=k,
@@ -569,10 +558,6 @@ def test_real_staged_apply_matches_marlin(monkeypatch):
             is_act_and_mul=True,
         )
     )
-    quant_config = nvfp4_w4a16_moe_quant_config(
-        w13_global, w2_global, w13_scale, w2_scale
-    )
-
     levels = torch.tensor(
         [-0.5, -0.25, -0.125, 0.0, 0.125, 0.25, 0.5],
         dtype=dtype,
@@ -581,6 +566,33 @@ def test_real_staged_apply_matches_marlin(monkeypatch):
     hidden = levels[torch.arange(m * k, device="cuda").remainder(levels.numel())].view(
         m, k
     )
+    return SimpleNamespace(
+        hidden=hidden,
+        layer=layer,
+        quant_config=nvfp4_w4a16_moe_quant_config(
+            w13_global, w2_global, w13_scale, w2_scale
+        ),
+        w13=w13,
+        w2=w2,
+    )
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability(90)
+        and hasattr(torch.ops._C, "marlin_nvfp4_to_fp8")
+    ),
+    reason="The staged NVFP4-to-FP8 MoE path requires SM90.",
+)
+@pytest.mark.usefixtures("default_vllm_config")
+def test_real_staged_apply_matches_marlin(monkeypatch):
+    e, m, n, k, topk = 2, 8, 128, 128, 2
+    dtype = torch.bfloat16
+    config = _config(e=e, p=n, k=k, topk=topk, dtype=dtype)
+    case = _real_nvfp4_case(e, m, n, k)
+    layer, quant_config = case.layer, case.quant_config
+    hidden, w13, w2 = case.hidden, case.w13, case.w2
     topk_ids = torch.tensor([[0, 1], [1, 0]], device="cuda").repeat(m // 2, 1)
     topk_weights = torch.tensor(
         [[0.75, 0.25], [0.25, 0.75]], dtype=torch.float32, device="cuda"
@@ -650,3 +662,121 @@ def test_real_staged_apply_matches_marlin(monkeypatch):
     assert scratch[1][2] == (e, 1, 1)
     assert reference.abs().max() > 0.1
     torch.testing.assert_close(staged, reference, rtol=0.1, atol=4e-2)
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability(90)
+        and hasattr(torch.ops._C, "marlin_nvfp4_hybrid_moe")
+    ),
+    reason="The native hybrid NVFP4 MoE path requires SM90.",
+)
+@pytest.mark.usefixtures("default_vllm_config")
+def test_real_native_outer_matches_marlin_at_runtime_knee():
+    e, n, k, knee = 2, 512, 128, 128
+    dtype = torch.bfloat16
+    case = _real_nvfp4_case(e, knee, n, k)
+
+    for global_e in (e, 2 * e):
+        expert_map = None
+        if global_e != e:
+            expert_map = torch.tensor([0, -1, 1, -1], device="cuda", dtype=torch.int32)
+
+        for apply_router_weight_on_input in (False, True):
+            topk = 1 if apply_router_weight_on_input else 2
+            config = _config(e=global_e, p=n, k=k, topk=topk, dtype=dtype)
+            if expert_map is not None:
+                config = replace(config, num_local_experts=e)
+            native_experts = NvFp4ByCopyExperts(config, case.quant_config)
+            native_experts.m_knee = knee
+            native_experts.marlin_workspace = case.layer.workspace
+            native_experts.w13_fp8_scale_divisor_code = (
+                case.layer.w13_fp8_scale_divisor_code
+            )
+            native_experts.w2_fp8_scale_divisor_code = (
+                case.layer.w2_fp8_scale_divisor_code
+            )
+            assert native_experts._use_native(n, k, MoEActivation.SILU)
+            reference_experts = MarlinExperts(config, case.quant_config)
+
+            for m in (knee - 1, knee):
+                rows = torch.arange(m, device="cuda")
+                topk_ids = torch.stack(
+                    [(rows + choice).remainder(global_e) for choice in range(topk)],
+                    dim=1,
+                )
+                if apply_router_weight_on_input:
+                    topk_weights = (0.25 + rows.remainder(4) * 0.125).view(m, 1)
+                    hidden = case.hidden[:m] * topk_weights.to(dtype)
+                    reference_weights = torch.ones_like(topk_weights)
+                else:
+                    first = torch.where(rows.remainder(2).bool(), 0.25, 0.75)
+                    topk_weights = torch.stack((first, 1 - first), dim=1)
+                    hidden = case.hidden[:m]
+                    reference_weights = topk_weights
+                topk_weights = topk_weights.to(torch.float32)
+                reference_weights = reference_weights.to(torch.float32)
+
+                reference_ws13, reference_ws2, _ = reference_experts.workspace_shapes(
+                    m,
+                    n,
+                    k,
+                    topk,
+                    global_e,
+                    e,
+                    None,
+                    MoEActivation.SILU,
+                )
+                reference = torch.empty_like(hidden)
+                reference_experts.apply(
+                    reference,
+                    hidden,
+                    case.w13,
+                    case.w2,
+                    reference_weights,
+                    topk_ids,
+                    MoEActivation.SILU,
+                    global_e,
+                    expert_map,
+                    None,
+                    None,
+                    torch.empty(reference_ws13, dtype=dtype, device="cuda"),
+                    torch.empty(reference_ws2, dtype=dtype, device="cuda"),
+                    None,
+                    False,
+                )
+
+                native_ws13, native_ws2, _ = native_experts.workspace_shapes(
+                    m,
+                    n,
+                    k,
+                    topk,
+                    global_e,
+                    e,
+                    None,
+                    MoEActivation.SILU,
+                )
+                arena = torch.empty(native_ws13, dtype=dtype, device="cuda")
+                actual = arena[: m * k].view(m, k)
+                assert actual.data_ptr() == arena.data_ptr()
+                native_experts.apply(
+                    actual,
+                    hidden,
+                    case.w13,
+                    case.w2,
+                    topk_weights,
+                    topk_ids,
+                    MoEActivation.SILU,
+                    global_e,
+                    expert_map,
+                    None,
+                    None,
+                    arena,
+                    torch.empty(native_ws2, dtype=dtype, device="cuda"),
+                    None,
+                    apply_router_weight_on_input,
+                )
+
+                assert reference.abs().max() > 0.1
+                torch.testing.assert_close(actual, reference, rtol=0.1, atol=4e-2)

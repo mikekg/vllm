@@ -12,8 +12,6 @@ from decimal import Decimal, InvalidOperation
 from functools import partial
 from pathlib import Path
 
-import regex as re
-
 INVALID = -9_999_999
 
 
@@ -23,11 +21,27 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def answer_value(text: str) -> int:
-    numbers = re.findall(r"[-+]?(?:\d[\d,]*)(?:\.\d+)?", text)
-    if not numbers:
+    number = None
+    index = 0
+    while index < len(text):
+        start = index
+        if text[index] in "+-":
+            index += 1
+        if index >= len(text) or not text[index].isdigit():
+            index = start + 1
+            continue
+        index += 1
+        while index < len(text) and (text[index].isdigit() or text[index] == ","):
+            index += 1
+        if index + 1 < len(text) and text[index] == "." and text[index + 1].isdigit():
+            index += 2
+            while index < len(text) and text[index].isdigit():
+                index += 1
+        number = text[start:index]
+    if number is None:
         return INVALID
     try:
-        value = Decimal(numbers[-1].replace(",", ""))
+        value = Decimal(number.replace(",", ""))
         return int(value) if value == value.to_integral_value() else INVALID
     except InvalidOperation:
         return INVALID

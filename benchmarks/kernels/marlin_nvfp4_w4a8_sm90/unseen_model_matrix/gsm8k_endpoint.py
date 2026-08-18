@@ -3,12 +3,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
-import ast
 import json
 import math
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal, InvalidOperation
 from functools import partial
 from pathlib import Path
 
@@ -23,12 +23,13 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def answer_value(text: str) -> int:
-    numbers = re.findall(r"\d+", text.replace(",", ""))
+    numbers = re.findall(r"[-+]?(?:\d[\d,]*)(?:\.\d+)?", text)
     if not numbers:
         return INVALID
     try:
-        return ast.literal_eval(numbers[-1])
-    except (SyntaxError, ValueError):
+        value = Decimal(numbers[-1].replace(",", ""))
+        return int(value) if value == value.to_integral_value() else INVALID
+    except InvalidOperation:
         return INVALID
 
 
@@ -41,9 +42,11 @@ def exact_mcnemar(n01: int, n10: int) -> float:
 
 
 def paired_summary(baseline: list[dict], candidate: list[dict]) -> dict:
-    assert [row["question_id"] for row in baseline] == [
-        row["question_id"] for row in candidate
-    ]
+    identity = ("question_id", "question", "prompt", "gold_answer")
+    baseline_items = [tuple(row[key] for key in identity) for row in baseline]
+    candidate_items = [tuple(row[key] for key in identity) for row in candidate]
+    if baseline_items != candidate_items:
+        raise ValueError("baseline and candidate GSM8K items differ")
     n01 = sum(
         (not left["correct"]) and right["correct"]
         for left, right in zip(baseline, candidate)
@@ -123,17 +126,38 @@ def parse_args() -> argparse.Namespace:
 
 def self_test() -> None:
     assert answer_value("The answer is 1,234.") == 1234
+    assert answer_value("The answer is -1,234.0.") == -1234
+    assert answer_value("The answer is 12.5.") == INVALID
     assert answer_value("none") == INVALID
     assert exact_mcnemar(0, 0) == 1.0
     baseline = [
-        {"question_id": "0", "correct": False},
-        {"question_id": "1", "correct": True},
+        {
+            "question_id": "0",
+            "question": "q0",
+            "prompt": "p0",
+            "gold_answer": 0,
+            "correct": False,
+        },
+        {
+            "question_id": "1",
+            "question": "q1",
+            "prompt": "p1",
+            "gold_answer": 1,
+            "correct": True,
+        },
     ]
     candidate = [
-        {"question_id": "0", "correct": True},
-        {"question_id": "1", "correct": True},
+        {**baseline[0], "correct": True},
+        {**baseline[1], "correct": True},
     ]
     assert paired_summary(baseline, candidate)["delta_percentage_points"] == 50
+    candidate[0]["prompt"] = "different"
+    try:
+        paired_summary(baseline, candidate)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("paired summary accepted different GSM8K items")
 
 
 def main() -> None:

@@ -1070,16 +1070,25 @@ d(x,y)
 
 Identical tensors give zero; smaller values mean closer aggregate agreement.
 The existing DeepGEMM unit-test boundary is `d < 0.001`. The first high-M
-native-versus-Marlin comparison measured `0.001113852751636557`. That was not
-the correct oracle for the high branch: Marlin executes W4A16, whereas the
-selected high branch performs transient FP8 conversion, FP8 activation
-quantization, and grouped DeepGEMM. The corresponding behavioral reference is
-the Python implementation of that same DeepGEMM sequence.
+native-versus-Marlin comparison measured `0.001113852751636557`, or about
+`0.111%` when the metric itself is expressed as a percentage. When the two
+output norms are similar, the corresponding relative L2 difference is
+approximately `sqrt(2d)`, or `4.72%`. This is valid replacement-consistency
+evidence: it quantifies the output drift between the current W4A16 Marlin path
+and the proposed FP8 DeepGEMM path. It is not an isolated oracle for the native
+wrapper's implementation fidelity because it also includes the arithmetic,
+conversion, quantization, and rounding differences between the two backends.
+The implementation-fidelity reference is the Python implementation of the
+same DeepGEMM sequence.
 
 After the two-operation activation correction, another comparison with Marlin
 measured `0.0011665152362726472`. This second value records the numerical drift
-between the W4A16 Marlin and FP8 DeepGEMM backends; it does not isolate native
-composition correctness. The `0.001` threshold was not relaxed.
+between the W4A16 Marlin and FP8 DeepGEMM backends and provides another
+replacement-consistency measurement; it does not isolate native composition
+correctness. The `0.001` threshold was not relaxed. These whole-tensor metric
+values are retained alongside `max_abs`, relative-L2, and cosine comparisons;
+end-to-end output accuracy is evaluated separately with paired GSM8K outcomes
+and an exact McNemar test.
 
 The final branch-aware test compares the low-M branch with Marlin and the
 high-M branch with the Python DeepGEMM prototype. H100 job `6170209` exercised

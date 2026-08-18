@@ -3382,10 +3382,15 @@ d(x,y)
 \]
 
 Zero denotes identical tensors. The established DeepGEMM unit-test comparison
-uses `d < 0.001`; that boundary was not changed. Marlin was not the matching
-high-branch oracle because it retains W4A16 arithmetic, while the high branch
-converts the resident weights to FP8, quantizes activations to FP8, and invokes
-grouped DeepGEMM.
+uses `d < 0.001`; that boundary was not changed. The measured value is about
+`0.111%` when `d` itself is expressed as a percentage. If the two output norms
+are similar, `relative-L2` is approximately `sqrt(2d)`, which is `4.72%` for
+this value. The Marlin comparison is valid replacement-consistency evidence:
+it measures the output drift introduced by replacing the W4A16 path with the
+FP8 path. It is not the isolated native-wrapper fidelity oracle because the
+comparison includes the different backend arithmetic, weight conversion,
+activation quantization, and rounding. The matching fidelity oracle is the
+Python implementation of the same DeepGEMM sequence.
 
 The native composition also differed from its actual Python DeepGEMM reference
 at the intermediate activation boundary. The fused native SiLU-plus-quantize
@@ -3403,10 +3408,13 @@ Repeating the high-M comparison against Marlin after that correction produced
 calc_diff = 0.0011665152362726472
 ```
 
-The value demonstrates the cross-backend W4A16-versus-FP8 numerical drift; it
-is not a measure of native-versus-prototype agreement. The final test therefore
+The value is a second replacement-consistency measurement of the cross-backend
+W4A16-versus-FP8 numerical drift; it is not a measure of
+native-versus-prototype agreement. The final branch-fidelity test therefore
 uses Marlin as the below-knee oracle and the Python DeepGEMM prototype as the
-at-knee oracle.
+at-knee oracle. The replacement study retains `calc_diff` together with
+`max_abs`, relative-L2, and cosine values. Model-output accuracy is evaluated
+separately through paired GSM8K outcomes and an exact McNemar test.
 
 H100 job `6170209` ran both `M=127` and `M=128` for `M_knee=128`, local and
 expert-parallel routing, and router-weight-on-input disabled and enabled. Its

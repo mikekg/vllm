@@ -3,6 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import hashlib
 import json
 import math
 import time
@@ -11,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, InvalidOperation
 from functools import partial
 from pathlib import Path
+
+import numpy as np
 
 INVALID = -9_999_999
 
@@ -70,6 +73,25 @@ def paired_summary(baseline: list[dict], candidate: list[dict]) -> dict:
         for left, right in zip(baseline, candidate)
     )
     total = len(baseline)
+    probabilities = (
+        np.array(
+            [
+                sum(
+                    left["correct"] and right["correct"]
+                    for left, right in zip(baseline, candidate)
+                ),
+                n10,
+                n01,
+                sum(
+                    (not left["correct"]) and (not right["correct"])
+                    for left, right in zip(baseline, candidate)
+                ),
+            ]
+        )
+        / total
+    )
+    samples = np.random.default_rng(0).multinomial(total, probabilities, 200_000)
+    deltas = (samples[:, 2] - samples[:, 1]) * 100.0 / total
     return {
         "n": total,
         "n01_baseline_wrong_candidate_right": n01,
@@ -77,6 +99,9 @@ def paired_summary(baseline: list[dict], candidate: list[dict]) -> dict:
         "baseline_correct": sum(row["correct"] for row in baseline),
         "candidate_correct": sum(row["correct"] for row in candidate),
         "delta_percentage_points": 100.0 * (n01 - n10) / total,
+        "delta_pp_ci95": np.percentile(deltas, [2.5, 97.5]).tolist(),
+        "delta_pp_lower95": float(np.percentile(deltas, 5.0)),
+        "ci_method": "paired multinomial bootstrap, seed 0, 200000 draws",
         "exact_two_sided_mcnemar_p": exact_mcnemar(n01, n10),
     }
 
@@ -114,9 +139,11 @@ def request_completion(prompt: str, *, url: str, model: str, timeout: float) -> 
     with urllib.request.urlopen(request, timeout=timeout) as response:
         result = json.load(response)
     choice = result["choices"][0]
+    usage = result.get("usage", {})
     return {
         "generated_answer": choice.get("text") or "",
-        "completion_tokens": result.get("usage", {}).get("completion_tokens", 0),
+        "prompt_tokens": usage.get("prompt_tokens", 0),
+        "completion_tokens": usage.get("completion_tokens", 0),
         "finish_reason": choice.get("finish_reason"),
         "request_seconds": time.perf_counter() - started,
     }
@@ -165,7 +192,11 @@ def self_test() -> None:
         {**baseline[0], "correct": True},
         {**baseline[1], "correct": True},
     ]
-    assert paired_summary(baseline, candidate)["delta_percentage_points"] == 50
+    paired = paired_summary(baseline, candidate)
+    assert paired["delta_percentage_points"] == 50
+    assert paired["delta_pp_ci95"] == [0.0, 100.0]
+    assert paired["delta_pp_lower95"] == 0.0
+    assert paired["ci_method"] == ("paired multinomial bootstrap, seed 0, 200000 draws")
     candidate[0]["prompt"] = "different"
     try:
         paired_summary(baseline, candidate)
@@ -225,19 +256,37 @@ def main() -> None:
 
     correct = sum(row["correct"] for row in details)
     invalid = sum(row["parsed_answer"] is None for row in details)
-    output_tokens = sum(row["completion_tokens"] for row in details)
+    completion_tokens = [row["completion_tokens"] for row in details]
+    output_tokens = sum(completion_tokens)
     summary = {
         "model": args.model,
         "model_revision": args.model_revision or None,
         "variant": args.variant,
+        "workload_kind": "gsm8k_accuracy_variable_output",
+        "max_concurrency": args.max_concurrency,
+        "matched_token_throughput": False,
+        "prompt_corpus_sha256": hashlib.sha256(
+            json.dumps(prompts, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest(),
         "num_questions": len(details),
         "correct": correct,
         "accuracy": correct / len(details),
         "invalid": invalid,
         "invalid_rate": invalid / len(details),
         "latency": latency,
+        "questions_per_second": len(details) / latency,
+        "total_prompt_tokens": sum(row["prompt_tokens"] for row in details),
         "total_output_tokens": output_tokens,
         "tokens_per_second": output_tokens / latency,
+        "completion_tokens": {
+            "min": min(completion_tokens),
+            "median": float(np.median(completion_tokens)),
+            "p95": float(np.percentile(completion_tokens, 95)),
+            "max": max(completion_tokens),
+            "total": output_tokens,
+        },
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
     details_path = args.output_dir / "details.jsonl"

@@ -143,6 +143,10 @@ if(DEEPGEMM_ARCHS)
     list(APPEND _dg_seen_soabis "${_dg_soabi}")
     set(_dg_dir "${CMAKE_CURRENT_BINARY_DIR}/deepgemm_C_${_dg_soabi}")
     set(_dg_marker "${_dg_dir}/.built")
+    if(NOT _dg_patched_utils)
+      set(_dg_patched_utils
+        "${_dg_dir}/deepgemm-include/deep_gemm/common/utils.cuh")
+    endif()
     add_custom_command(
       OUTPUT "${_dg_marker}"
       COMMAND "${Python_EXECUTABLE}"
@@ -207,6 +211,9 @@ if(DEEPGEMM_ARCHS)
   # DeepGEMM's own CUDA headers
   install(DIRECTORY "${deepgemm_SOURCE_DIR}/deep_gemm/include/"
     DESTINATION vllm/third_party/deep_gemm/include
+    COMPONENT _deep_gemm_C)
+  install(FILES "${_dg_patched_utils}"
+    DESTINATION vllm/third_party/deep_gemm/include/deep_gemm/common
     COMPONENT _deep_gemm_C)
 
   # CUTLASS and CuTe headers (vendored for JIT, separate from vLLM's CUTLASS)

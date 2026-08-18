@@ -31,6 +31,20 @@ out.mkdir(parents=True, exist_ok=True)
 
 patched_csrc = out / "deepgemm-csrc"
 shutil.copytree(src / "csrc", patched_csrc, dirs_exist_ok=True)
+patched_include = out / "deepgemm-include"
+patched_utils = patched_include / "deep_gemm/common/utils.cuh"
+patched_utils.parent.mkdir(parents=True, exist_ok=True)
+shutil.copy2(src / "deep_gemm/include/deep_gemm/common/utils.cuh", patched_utils)
+utils_source = patched_utils.read_text()
+if "#include <utility>" in utils_source:
+    assert utils_source.count("#include <utility>") == 1
+    assert utils_source.count("std::") == 4
+    utils_source = utils_source.replace(
+        "#include <utility>", "#include <cuda/std/utility>"
+    )
+    utils_source = utils_source.replace("std::", "cuda::std::")
+    patched_utils.write_text(utils_source)
+
 compiler = patched_csrc / "jit" / "compiler.hpp"
 compiler_source = compiler.read_text()
 # NVRTC omits device-runtime declarations that NVCC pre-includes.
@@ -78,6 +92,7 @@ includes = [
     cusparse_include,
     str(vllm_root / "csrc"),
     str(patched_csrc),
+    str(patched_include),
     str(src / "deep_gemm/include"),
     str(src / "third-party/cutlass/include"),
     str(src / "third-party/cutlass/tools/util/include"),

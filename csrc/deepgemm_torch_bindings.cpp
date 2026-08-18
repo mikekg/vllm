@@ -63,7 +63,7 @@ void deep_gemm_m_grouped_fp8_gemm_nt_contiguous(
     const Tensor& weight_scale, const Tensor& out, const Tensor& expert_ids) {
   deep_gemm::gemm::m_grouped_fp8_fp4_gemm_nt_contiguous(
       {a, a_scale}, {weight, weight_scale}, out, expert_ids, std::nullopt,
-      std::nullopt, std::nullopt, "nk", true, false, std::nullopt);
+      std::nullopt, std::nullopt, "nk", true, false, true, std::nullopt);
 }
 
 void call_converter(const Tensor& fp8_weight, const Tensor& fp8_scale,

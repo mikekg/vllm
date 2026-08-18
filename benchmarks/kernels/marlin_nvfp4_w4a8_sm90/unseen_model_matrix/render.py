@@ -171,8 +171,8 @@ def sbatch(
     job_file: str,
     config_file: str,
     name: str,
+    time_limit: str,
     dependency: str | None = None,
-    time_limit: str = "12:00:00",
 ) -> str:
     topology = model["topology"]
     options = [
@@ -276,59 +276,99 @@ def render_performance(
     python: str,
     output: Path,
     package: tuple[str, str] | None,
-) -> str:
+) -> tuple[str, str]:
     runtime = data["runtime"]
     matrix = data["matrix"]
     source = harness(runtime)
     job_file = f"{source}/unseen_model_once.sbatch"
     concurrencies = ",".join(map(str, matrix["concurrencies"]))
+    workload_time_limits = {
+        "1k1k": "00:45:00",
+        "5k1k": "01:00:00",
+        "8k1k": "01:30:00",
+    }
     lines = header("performance.jobs", package)
+    high_lines = header("performance_high.jobs", package)
 
     for model in data["models"]:
         for workload in matrix["workloads"]:
-            for variant in matrix["variants"]:
-                result = (
-                    f"{runtime['results']}/{run_id}/{model['id']}/"
-                    f"performance/{variant}/{workload['id']}"
-                )
-                env = common_env(data, model, variant, overlay, python)
-                env.update(
-                    {
-                        "ISL": str(workload["input_tokens"]),
-                        "OSL": str(matrix["output_tokens"]),
-                        "CONCS": concurrencies,
-                        "RESULT_DIR": result,
-                        "CACHE_ROOT": f"{result}/cache",
-                        "IXBENCH": (
-                            f"{runtime['shared_scripts']}/"
-                            "bench_serving/benchmark_serving.py"
-                        ),
-                    }
-                )
-                stem = f"{model['id']}-{variant}-{workload['id']}"
-                config_file = (
-                    Path("configs")
-                    / "performance"
-                    / model["id"]
-                    / variant
-                    / f"{workload['id']}.env"
-                )
-                write_env(output / config_file, env)
-                lines.append('gap=$(gap_after "$job" ' + shlex.quote(stem) + ")")
-                record_gap(lines, f"{stem}-gap-before")
-                lines.append(
-                    sbatch(
-                        model,
-                        job_file,
-                        str(config_file),
-                        stem,
-                        dependency="gap",
+            slices = (
+                [
+                    (
+                        lines,
+                        "c1-c128",
+                        ",".join(map(str, matrix["concurrencies"][:-2])),
+                        "02:00:00",
+                    ),
+                    (high_lines, "c256", "256", "01:30:00"),
+                    (high_lines, "c512", "512", "01:30:00"),
+                ]
+                if workload["id"] == "50k1k"
+                else [
+                    (
+                        lines,
+                        "",
+                        concurrencies,
+                        workload_time_limits[workload["id"]],
                     )
-                )
-                record(lines, stem)
+                ]
+            )
+            for job_lines, suffix, slice_concurrencies, time_limit in slices:
+                for variant in matrix["variants"]:
+                    result = (
+                        f"{runtime['results']}/{run_id}/{model['id']}/"
+                        f"performance/{variant}/{workload['id']}"
+                    )
+                    if suffix:
+                        result += f"/{suffix}"
+                    env = common_env(data, model, variant, overlay, python)
+                    env.update(
+                        {
+                            "ISL": str(workload["input_tokens"]),
+                            "OSL": str(matrix["output_tokens"]),
+                            "CONCS": slice_concurrencies,
+                            "RESULT_DIR": result,
+                            "CACHE_ROOT": f"{result}/cache",
+                            "IXBENCH": (
+                                f"{runtime['shared_scripts']}/"
+                                "bench_serving/benchmark_serving.py"
+                            ),
+                        }
+                    )
+                    stem = f"{model['id']}-{variant}-{workload['id']}"
+                    if suffix:
+                        stem += f"-{suffix}"
+                    config_name = (
+                        f"{workload['id']}{'-' + suffix if suffix else ''}.env"
+                    )
+                    config_file = (
+                        Path("configs")
+                        / "performance"
+                        / model["id"]
+                        / variant
+                        / config_name
+                    )
+                    write_env(output / config_file, env)
+                    job_lines.append(
+                        'gap=$(gap_after "$job" ' + shlex.quote(stem) + ")"
+                    )
+                    record_gap(job_lines, f"{stem}-gap-before")
+                    job_lines.append(
+                        sbatch(
+                            model,
+                            job_file,
+                            str(config_file),
+                            stem,
+                            time_limit,
+                            dependency="gap",
+                        )
+                    )
+                    record(job_lines, stem)
         lines.append("")
+        high_lines.append("")
     lines.append('printf "tail %s\\n" "$job" >>"$manifest"')
-    return "\n".join(lines)
+    high_lines.append('printf "tail %s\\n" "$job" >>"$manifest"')
+    return "\n".join(lines), "\n".join(high_lines)
 
 
 def render_gsm8k(
@@ -385,8 +425,13 @@ def render_gsm8k(
                     job_file,
                     str(config_file),
                     stem,
+                    (
+                        "03:00:00"
+                        if model["topology"]["nodes"] > 1
+                        or model["topology"]["engine_tp"] >= 8
+                        else "02:00:00"
+                    ),
                     dependency="gap",
-                    time_limit="08:00:00",
                 )
             )
             record(lines, stem)
@@ -431,17 +476,22 @@ def main() -> None:
         )
     args.output.mkdir(parents=True, exist_ok=False)
     performance = args.output / "submit_performance.sh"
+    performance_high = args.output / "submit_performance_high.sh"
     gsm8k = args.output / "submit_gsm8k.sh"
+    rendered_performance, rendered_performance_high = render_performance(
+        data,
+        args.run_id,
+        overlay,
+        python,
+        args.output,
+        package,
+    )
     performance.write_text(
-        render_performance(
-            data,
-            args.run_id,
-            overlay,
-            python,
-            args.output,
-            package,
-        )
-        + "\n",
+        rendered_performance + "\n",
+        encoding="utf-8",
+    )
+    performance_high.write_text(
+        rendered_performance_high + "\n",
         encoding="utf-8",
     )
     gsm8k.write_text(
@@ -457,9 +507,11 @@ def main() -> None:
         encoding="utf-8",
     )
     performance.chmod(0o755)
+    performance_high.chmod(0o755)
     gsm8k.chmod(0o755)
     print(
         f"rendered {len(data['models']) * 8} performance and "
+        f"{len(data['models']) * 4} high-concurrency and "
         f"{len(data['models']) * 2} GSM8K jobs"
     )
 

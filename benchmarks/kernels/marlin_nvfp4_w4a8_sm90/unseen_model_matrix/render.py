@@ -17,8 +17,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--matrix", type=Path, default=HERE / "matrix.yaml")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--overlay", required=True)
-    parser.add_argument("--python", required=True)
+    runtime = parser.add_mutually_exclusive_group(required=True)
+    runtime.add_argument("--overlay")
+    runtime.add_argument("--venv")
+    parser.add_argument("--python")
+    parser.add_argument("--source-revision")
     return parser.parse_args()
 
 
@@ -85,7 +88,7 @@ def common_env(
     data: dict,
     model: dict,
     variant: str,
-    overlay: str,
+    overlay: str | None,
     python: str,
 ) -> dict[str, str]:
     runtime = data["runtime"]
@@ -102,15 +105,9 @@ def common_env(
             f"{Path(python).parent}:"
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         ),
-        "PYTHONPATH": f"{overlay}/overlay",
-        "CUDA_HOME": f"{overlay}/cuda",
         "LD_LIBRARY_PATH": (
             "/usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib:"
             "/usr/local/lib/python3.12/dist-packages/torch/lib"
-        ),
-        "LD_PRELOAD": (
-            f"{overlay}/overlay/vllm/_C_stable_libtorch.abi3.so:"
-            f"{overlay}/converter/marlin_nvfp4_to_fp8_sm90a.so"
         ),
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
@@ -142,6 +139,21 @@ def common_env(
     }
     if topology["dp"] > 1:
         env["DP_SIZE"] = str(topology["dp"])
+    if overlay:
+        env.update(
+            {
+                "PYTHONPATH": f"{overlay}/overlay",
+                "CUDA_HOME": f"{overlay}/cuda",
+                "LD_PRELOAD": (
+                    f"{overlay}/overlay/vllm/_C_stable_libtorch.abi3.so:"
+                    f"{overlay}/converter/marlin_nvfp4_to_fp8_sm90a.so"
+                ),
+            }
+        )
+    else:
+        venv = Path(python).parent.parent
+        env["VIRTUAL_ENV"] = str(venv)
+        env["CUDA_HOME"] = str(venv.parent / "cuda")
     return env
 
 
@@ -182,10 +194,17 @@ def sbatch(
     )
 
 
-def header(manifest: str) -> list[str]:
-    return [
+def header(
+    manifest: str,
+    package: tuple[str, str] | None,
+) -> list[str]:
+    lines = [
         "#!/bin/bash",
         "set -euo pipefail",
+        "[[ $# -eq 1 && $1 =~ ^[0-9]+(:[0-9]+)*$ ]] || { "
+        'echo "usage: $0 PREVIOUS_SLURM_JOB[:PREVIOUS_SLURM_JOB...]" >&2; '
+        "exit 2; }",
+        "job=$1",
         "unset VLLM_DIAGNOSTIC_MOE_M_KNEE VLLM_DISABLED_KERNELS",
         'here=$(cd -- "$(dirname -- "$0")" && pwd)',
         "if [[ $here != /lustre/fs1/* ]]; then",
@@ -193,15 +212,55 @@ def header(manifest: str) -> list[str]:
         "  exit 2",
         "fi",
         f'manifest="$here/{manifest}"',
-        ': >"$manifest"',
-        "gap_after() {",
-        "  sbatch --parsable --partition=cpu_short --account=sw_aidot "
-        "--qos=normal --cpus-per-task=1 --mem=1G --time=00:06:00 "
-        '--dependency="${3:-afterany}:$1" --job-name="$2-gap" '
-        "--wrap='sleep 300'",
-        "}",
-        "",
+        "[[ ! -e $manifest ]]",
     ]
+    if package:
+        venv, revision = package
+        artifact = str(Path(venv).parent)
+        site = f"{venv}/lib/python3.12/site-packages/vllm"
+        libraries = [
+            f"{site}/_C_stable_libtorch.abi3.so",
+            f"{site}/_moe_C_stable_libtorch.abi3.so",
+            f"{site}/third_party/deep_gemm/_C.cpython-312-x86_64-linux-gnu.so",
+        ]
+        lines.extend(
+            [
+                f"venv={shlex.quote(venv)}",
+                f"site={shlex.quote(site)}",
+                f"[[ $(<{shlex.quote(f'{artifact}/source-revision')}) == "
+                f"{shlex.quote(revision)} ]]",
+                f"[[ -L {shlex.quote(f'{artifact}/cuda')} ]]",
+                *[f"[[ -s {shlex.quote(path)} ]]" for path in libraries],
+                'grep -q _vllm_is_moe_router "$site/model_executor/'
+                'model_loader/utils.py"',
+                'grep -q _vllm_is_moe_router "$site/model_executor/kernels/'
+                'linear/nvfp4/marlin_fp8.py"',
+                "grep -a -q marlin_nvfp4_hybrid_linear "
+                '"$site/_C_stable_libtorch.abi3.so"',
+                "grep -a -q marlin_nvfp4_hybrid_moe "
+                '"$site/third_party/deep_gemm/'
+                '_C.cpython-312-x86_64-linux-gnu.so"',
+                f"printf 'source_revision %s\\nvenv %s\\npredecessor %s\\n' "
+                f'{shlex.quote(revision)} "$venv" "$job" >"$manifest"',
+                "sha256sum "
+                + " ".join(shlex.quote(path) for path in libraries)
+                + ' >>"$manifest"',
+            ]
+        )
+    else:
+        lines.append('printf "predecessor %s\\n" "$job" >"$manifest"')
+    lines.extend(
+        [
+            "gap_after() {",
+            "  sbatch --parsable --partition=cpu_short --account=sw_aidot "
+            "--qos=normal --cpus-per-task=1 --mem=1G --time=00:06:00 "
+            '--dependency="${3:-afterany}:$1" --job-name="$2-gap" '
+            "--wrap='sleep 300'",
+            "}",
+            "",
+        ]
+    )
+    return lines
 
 
 def record(lines: list[str], label: str) -> None:
@@ -215,21 +274,21 @@ def record_gap(lines: list[str], label: str) -> None:
 def render_performance(
     data: dict,
     run_id: str,
-    overlay: str,
+    overlay: str | None,
     python: str,
     output: Path,
+    package: tuple[str, str] | None,
 ) -> str:
     runtime = data["runtime"]
     matrix = data["matrix"]
     source = harness(runtime)
     job_file = f"{source}/unseen_model_once.sbatch"
     concurrencies = ",".join(map(str, matrix["concurrencies"]))
-    lines = header("performance.jobs")
+    lines = header("performance.jobs", package)
 
     for model in data["models"]:
-        first = True
-        for variant in matrix["variants"]:
-            for workload in matrix["workloads"]:
+        for workload in matrix["workloads"]:
+            for variant in matrix["variants"]:
                 result = (
                     f"{runtime['results']}/{run_id}/{model['id']}/"
                     f"performance/{variant}/{workload['id']}"
@@ -257,39 +316,37 @@ def render_performance(
                     / f"{workload['id']}.env"
                 )
                 write_env(output / config_file, env)
-                if first:
-                    lines.append(sbatch(model, job_file, str(config_file), stem))
-                    first = False
-                else:
-                    lines.append('gap=$(gap_after "$job" ' + shlex.quote(stem) + ")")
-                    record_gap(lines, f"{stem}-gap-before")
-                    lines.append(
-                        sbatch(
-                            model,
-                            job_file,
-                            str(config_file),
-                            stem,
-                            dependency="gap",
-                        )
+                lines.append('gap=$(gap_after "$job" ' + shlex.quote(stem) + ")")
+                record_gap(lines, f"{stem}-gap-before")
+                lines.append(
+                    sbatch(
+                        model,
+                        job_file,
+                        str(config_file),
+                        stem,
+                        dependency="gap",
                     )
+                )
                 record(lines, stem)
         lines.append("")
+    lines.append('printf "tail %s\\n" "$job" >>"$manifest"')
     return "\n".join(lines)
 
 
 def render_gsm8k(
     data: dict,
     run_id: str,
-    overlay: str,
+    overlay: str | None,
     python: str,
     output: Path,
+    package: tuple[str, str] | None,
 ) -> str:
     runtime = data["runtime"]
     matrix = data["matrix"]
     source = harness(runtime)
     job_file = f"{source}/unseen_model_once.sbatch"
     examples = str(matrix["accuracy"]["examples"])
-    lines = header("gsm8k.jobs")
+    lines = header("gsm8k.jobs", package)
 
     for model in data["models"]:
         baseline = (
@@ -319,33 +376,24 @@ def render_gsm8k(
             stem = f"{model['id']}-{variant}-gsm8k"
             config_file = Path("configs") / "gsm8k" / model["id"] / f"{variant}.env"
             write_env(output / config_file, env)
-            if index == 0:
-                lines.append(
-                    sbatch(
-                        model,
-                        job_file,
-                        str(config_file),
-                        stem,
-                        time_limit="08:00:00",
-                    )
+            dependency = "afterok" if index else "afterany"
+            lines.append(
+                'gap=$(gap_after "$job" ' + shlex.quote(stem) + f" {dependency})"
+            )
+            record_gap(lines, f"{stem}-gap-before")
+            lines.append(
+                sbatch(
+                    model,
+                    job_file,
+                    str(config_file),
+                    stem,
+                    dependency="gap",
+                    time_limit="08:00:00",
                 )
-            else:
-                lines.append(
-                    'gap=$(gap_after "$job" ' + shlex.quote(stem) + " afterok)"
-                )
-                record_gap(lines, f"{stem}-gap-before")
-                lines.append(
-                    sbatch(
-                        model,
-                        job_file,
-                        str(config_file),
-                        stem,
-                        dependency="gap",
-                        time_limit="08:00:00",
-                    )
-                )
+            )
             record(lines, stem)
         lines.append("")
+    lines.append('printf "tail %s\\n" "$job" >>"$manifest"')
     return "\n".join(lines)
 
 
@@ -353,14 +401,32 @@ def main() -> None:
     args = parse_args()
     data = yaml.safe_load(args.matrix.read_text(encoding="utf-8"))
     validate(data)
-    if not args.overlay.startswith("/lustre/fs1/"):
-        raise SystemExit("--overlay must be a validated /lustre/fs1 path")
+    package = None
+    if args.venv:
+        if args.python or not args.source_revision:
+            raise SystemExit("--venv requires --source-revision and derives --python")
+        if not args.venv.startswith("/lustre/fs1/"):
+            raise SystemExit("--venv must be a validated /lustre/fs1 path")
+        if len(args.source_revision) != 40 or any(
+            char not in "0123456789abcdef" for char in args.source_revision
+        ):
+            raise SystemExit("--source-revision must be a full lowercase Git SHA")
+        overlay = None
+        python = f"{args.venv.rstrip('/')}/bin/python"
+        package = (args.venv.rstrip("/"), args.source_revision)
+    else:
+        if not args.overlay.startswith("/lustre/fs1/"):
+            raise SystemExit("--overlay must be a validated /lustre/fs1 path")
+        if not args.python or args.source_revision:
+            raise SystemExit("--overlay requires --python only")
+        overlay = args.overlay
+        python = args.python
     image_pythons = {
         "/opt/venv/bin/python",
         "/usr/bin/python3",
         "/usr/local/bin/python",
     }
-    if args.python not in image_pythons and not args.python.startswith("/lustre/fs1/"):
+    if python not in image_pythons and not python.startswith("/lustre/fs1/"):
         raise SystemExit(
             "--python must be /opt/venv/bin/python, /usr/bin/python3, "
             "/usr/local/bin/python, or a validated /lustre/fs1 path"
@@ -372,9 +438,10 @@ def main() -> None:
         render_performance(
             data,
             args.run_id,
-            args.overlay,
-            args.python,
+            overlay,
+            python,
             args.output,
+            package,
         )
         + "\n",
         encoding="utf-8",
@@ -383,9 +450,10 @@ def main() -> None:
         render_gsm8k(
             data,
             args.run_id,
-            args.overlay,
-            args.python,
+            overlay,
+            python,
             args.output,
+            package,
         )
         + "\n",
         encoding="utf-8",

@@ -52,7 +52,7 @@ def exact_mcnemar(n01: int, n10: int) -> float:
     if not discordant:
         return 1.0
     tail = sum(math.comb(discordant, k) for k in range(min(n01, n10) + 1))
-    return min(1.0, 2.0 * tail / (2**discordant))
+    return min(1.0, tail / (2 ** (discordant - 1)))
 
 
 def paired_summary(baseline: list[dict], candidate: list[dict]) -> dict:
@@ -144,6 +144,7 @@ def self_test() -> None:
     assert answer_value("The answer is 12.5.") == INVALID
     assert answer_value("none") == INVALID
     assert exact_mcnemar(0, 0) == 1.0
+    assert exact_mcnemar(660, 659) == 1.0
     baseline = [
         {
             "question_id": "0",

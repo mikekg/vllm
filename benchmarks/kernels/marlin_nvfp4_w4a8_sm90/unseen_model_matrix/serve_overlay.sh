@@ -16,6 +16,11 @@ source "$1"
 : "${RESULT_DIR:?}"
 : "${CACHE_ROOT:?}"
 : "${PYTHON:?}"
+: "${CUDA_HOME:?}"
+
+[[ -f $CUDA_HOME/include/cuda/std/cstdint ]]
+[[ -f $CUDA_HOME/include/cuda_bf16.h ]]
+[[ -x $CUDA_HOME/bin/cuobjdump ]]
 
 : "${SLURM_JOB_ID:?}"
 PORT=${PORT:-$((10000 + SLURM_JOB_ID % 20000))}
@@ -29,6 +34,8 @@ LOG="$RESULT_DIR/server-rank${NODE_RANK}.log"
 STOP="$RESULT_DIR/.stop-$SLURM_JOB_ID"
 mkdir -p "$RESULT_DIR" "$CACHE_ROOT"
 export VLLM_CACHE_ROOT="$CACHE_ROOT"
+export DG_JIT_CACHE_DIR="$CACHE_ROOT/deep_gemm"
+mkdir -p "$DG_JIT_CACHE_DIR"
 
 server=(
   "$PYTHON" -m vllm.entrypoints.cli.main serve "$MODEL_PATH"

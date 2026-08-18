@@ -116,6 +116,7 @@ def common_env(
         "PYTHONDONTWRITEBYTECODE": "1",
         "CUDA_MODULE_LOADING": "EAGER",
         "VLLM_USE_DEEP_GEMM": "1",
+        "DG_JIT_USE_NVRTC": "1",
         "VLLM_TEST_FORCE_FP8_MARLIN": "0",
         "VLLM_DISABLED_KERNELS": (
             "MarlinNvFp4ToFp8LinearKernel,NvFp4ByCopyExperts"

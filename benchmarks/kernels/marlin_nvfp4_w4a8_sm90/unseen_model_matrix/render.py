@@ -440,6 +440,92 @@ def render_gsm8k(
     return "\n".join(lines)
 
 
+def render_route_diagnostics(
+    data: dict,
+    run_id: str,
+    overlay: str | None,
+    python: str,
+    output: Path,
+    package: tuple[str, str] | None,
+) -> str:
+    runtime = data["runtime"]
+    matrix = data["matrix"]
+    source = harness(runtime)
+    job_file = f"{source}/unseen_model_once.sbatch"
+    examples = str(matrix["accuracy"]["examples"])
+    lines = header("route_diagnostics.jobs", package)
+
+    for model in data["models"]:
+        shape = model.get("moe_shape")
+        if not shape:
+            continue
+        retained = (
+            f"{runtime['results']}/{run_id}/{model['id']}/gsm8k/"
+            "native_reference/details.jsonl"
+        )
+        baseline = (
+            f"{runtime['results']}/{run_id}/{model['id']}/route_diagnostic/"
+            "native_reference/summary.json"
+        )
+        for index, variant in enumerate(matrix["variants"]):
+            result = (
+                f"{runtime['results']}/{run_id}/{model['id']}/"
+                f"route_diagnostic/{variant}"
+            )
+            env = common_env(data, model, variant, overlay, python)
+            env.update(
+                {
+                    "ISL": "1024",
+                    "OSL": "256",
+                    "MML_OVERRIDE": "2048",
+                    "MAX_NUM_SEQS": "64",
+                    "RESULT_DIR": result,
+                    "CACHE_ROOT": f"{result}/cache",
+                    "GSM8K_CLIENT": f"{source}/routed_expert_diagnostic.py",
+                    "GSM8K_DATA": retained,
+                    "GSM8K_VARIANT": variant,
+                    "GSM8K_EXAMPLES": examples,
+                    "GSM8K_MAX_CONCURRENCY": "64",
+                    "ROUTE_EXPERTS": str(shape["global_experts"]),
+                    "ROUTE_TOP_K": str(shape["top_k"]),
+                    "EXTRA_SERVE": (
+                        f"{env['EXTRA_SERVE']} --enable-return-routed-experts"
+                    ),
+                }
+            )
+            if variant == "adaptive":
+                env["GSM8K_BASELINE_DETAILS"] = baseline
+            stem = f"{model['id']}-{variant}-route-diagnostic"
+            config_file = (
+                Path("configs") / "route_diagnostic" / model["id"] / f"{variant}.env"
+            )
+            write_env(output / config_file, env)
+            dependency = "afterok" if index else "afterany"
+            lines.append(
+                'gap=$(gap_after "$job" ' + shlex.quote(stem) + f" {dependency})"
+            )
+            record_gap(lines, f"{stem}-gap-before")
+            lines.append(
+                sbatch(
+                    model,
+                    job_file,
+                    str(config_file),
+                    stem,
+                    (
+                        "03:00:00"
+                        if model["topology"]["nodes"] > 1
+                        or model["topology"]["engine_tp"] >= 8
+                        else "02:00:00"
+                    ),
+                    dependency="gap",
+                )
+            )
+            record(lines, stem)
+        lines.append("")
+    lines.append('printf "tail %s\\n" "$job" >>"$manifest"')
+    return "\n".join(lines)
+
+
 def main() -> None:
     args = parse_args()
     data = yaml.safe_load(args.matrix.read_text(encoding="utf-8"))
@@ -478,6 +564,7 @@ def main() -> None:
     performance = args.output / "submit_performance.sh"
     performance_high = args.output / "submit_performance_high.sh"
     gsm8k = args.output / "submit_gsm8k.sh"
+    routes = args.output / "submit_route_diagnostics.sh"
     rendered_performance, rendered_performance_high = render_performance(
         data,
         args.run_id,
@@ -506,13 +593,28 @@ def main() -> None:
         + "\n",
         encoding="utf-8",
     )
+    routes.write_text(
+        render_route_diagnostics(
+            data,
+            args.run_id,
+            overlay,
+            python,
+            args.output,
+            package,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     performance.chmod(0o755)
     performance_high.chmod(0o755)
     gsm8k.chmod(0o755)
+    routes.chmod(0o755)
+    moe_models = sum("moe_shape" in model for model in data["models"])
     print(
         f"rendered {len(data['models']) * 8} performance and "
         f"{len(data['models']) * 4} high-concurrency and "
-        f"{len(data['models']) * 2} GSM8K jobs"
+        f"{len(data['models']) * 2} GSM8K and "
+        f"{moe_models * 2} route-diagnostic jobs"
     )
 
 

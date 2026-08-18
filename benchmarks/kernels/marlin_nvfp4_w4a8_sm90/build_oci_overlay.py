@@ -39,7 +39,15 @@ shutil.copytree(source / "vllm", overlay, dirs_exist_ok=True)
 build.mkdir(parents=True)
 
 base_dso = overlay / "_C_stable_libtorch.abi3.so"
-ctypes.CDLL(str(base_dso), mode=ctypes.RTLD_GLOBAL)
+try:
+    ctypes.CDLL(str(base_dso), mode=ctypes.RTLD_GLOBAL)
+except OSError as error:
+    cuda_stub = Path("/usr/local/cuda/lib64/stubs/libcuda.so")
+    missing_libcuda = "libcuda.so.1: cannot open shared object file" in str(error)
+    if not missing_libcuda or not cuda_stub.is_file():
+        raise
+    ctypes.CDLL(str(cuda_stub), mode=ctypes.RTLD_GLOBAL)
+    ctypes.CDLL(str(base_dso), mode=ctypes.RTLD_GLOBAL)
 assert not hasattr(torch.ops._C, "marlin_nvfp4_to_fp8")
 
 os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0a"

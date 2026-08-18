@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import torch
+from cuda.pathfinder import find_nvidia_header_directory
 from torch.utils import cpp_extension
 
 if len(sys.argv) != 4:
@@ -63,11 +64,15 @@ info = json.loads(
 cuda_home = cpp_extension.CUDA_HOME
 if cuda_home is None:
     sys.exit("CUDA_HOME not found; cannot build DeepGEMM _C")
+cusparse_include = find_nvidia_header_directory("cusparse")
+if cusparse_include is None:
+    sys.exit("cuSPARSE headers not found; cannot build DeepGEMM _C")
 # CCCL lives outside the standard CUDAToolkit search (mirrors DeepGEMM's setup.py).
 includes = [
     info["INCLUDEPY"],
     f"{cuda_home}/include",
     f"{cuda_home}/include/cccl",
+    cusparse_include,
     str(vllm_root / "csrc"),
     str(patched_csrc),
     str(src / "deep_gemm/include"),

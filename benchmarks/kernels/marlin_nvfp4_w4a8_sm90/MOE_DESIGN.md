@@ -982,7 +982,7 @@ prototype. It provides a reference for:
 - sequential `W13`/`W2` arena reuse;
 - runtime selection.
 
-The eventual endpoint is a new selectable hybrid expert implementation whose
+The production endpoint is a selectable hybrid expert implementation whose
 outer operation is native C++/CUDA, analogous to the dense hybrid operator.
 The low branch invokes the existing grouped Marlin implementation. The high
 branch launches conversion, quantization, routing support, grouped DeepGEMM,
@@ -1047,6 +1047,48 @@ paths and reported 3 passed in 12.31 seconds. The cases exercised the native
 hybrid operation, an `M=1` call below `M_knee=2` that selected Marlin, and an
 `M=3` call above `M_knee=1` that selected padded FP8.
 
+## Native outer-operation numerical validation
+
+Commit `4f577ce2aa` made packaged DeepGEMM NVRTC compilation self-contained by
+staging its patched runtime headers, using CUDA standard-library utilities in
+the JIT-visible header, and installing the exact patched `utils.cuh` consumed
+after packaging. Commit `c26551b19a` then matched the native high-M composition
+to the Python DeepGEMM prototype. The fused SiLU-plus-quantization call was
+replaced by the existing `_C::silu_and_mul` operation followed by
+`_C::per_token_group_fp8_quant`. The shared arena was enlarged when necessary
+to hold that BF16 activation result; after quantization, `W2` conversion reuses
+the same storage.
+
+The numerical investigation used the existing DeepGEMM whole-tensor metric
+
+\[
+d(x,y)
+= 1 - \frac{2\sum_j x_jy_j}{\sum_j (x_j^2+y_j^2)}
+= \frac{\lVert x-y\rVert_2^2}
+       {\lVert x\rVert_2^2+\lVert y\rVert_2^2}.
+\]
+
+Identical tensors give zero; smaller values mean closer aggregate agreement.
+The existing DeepGEMM unit-test boundary is `d < 0.001`. The first high-M
+native-versus-Marlin comparison measured `0.001113852751636557`. That was not
+the correct oracle for the high branch: Marlin executes W4A16, whereas the
+selected high branch performs transient FP8 conversion, FP8 activation
+quantization, and grouped DeepGEMM. The corresponding behavioral reference is
+the Python implementation of that same DeepGEMM sequence.
+
+After the two-operation activation correction, another comparison with Marlin
+measured `0.0011665152362726472`. This second value records the numerical drift
+between the W4A16 Marlin and FP8 DeepGEMM backends; it does not isolate native
+composition correctness. The `0.001` threshold was not relaxed.
+
+The final branch-aware test compares the low-M branch with Marlin and the
+high-M branch with the Python DeepGEMM prototype. H100 job `6170209` exercised
+the Cartesian product of below/at-knee selection, local/expert-parallel
+routing, and router-weight-on-input disabled/enabled. In every case the output
+also began at the same data pointer as the shared arena. The job compiled three
+SM90a DeepGEMM kernels through NVRTC, passed all eight combinations, and emitted
+`native-low-high-ep-router-alias-ok`.
+
 ## Unseen-model validation campaign
 
 Campaign `unseen-9340d68ade-20260818-r1` uses the tracked model matrix at the
@@ -1080,8 +1122,6 @@ The unresolved evidence and implementation work is:
 4. Results from the submitted full ladders on the additional model shapes.
 5. Separate interpretation of local positive gain and the overall 20–40%
    model-throughput objective.
-6. A native selectable expert operation using the proven Python sequence as
-   its behavioral reference.
 
 The established result is already stronger than functional proof: on Q3, the
 MoE-only hybrid improved actual-model throughput by 17.355%, and the complete

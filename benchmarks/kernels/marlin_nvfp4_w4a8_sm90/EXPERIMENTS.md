@@ -3357,3 +3357,63 @@ axes are arithmetic means from the synthetic cyclic route, not real serving
 histograms; Q36 half routing averages across only its 128 active experts.
 Connected lines show sampled points only. The retained medians provide no
 error bars or component breakdown.*
+
+## 65. Native outer-operation branch oracle
+
+Commit `4f577ce2aa` completed the packaged DeepGEMM runtime-JIT inputs. It
+staged the patched runtime headers, changed the JIT-visible utility header to
+CUDA standard-library utilities, and installed that exact patched header with
+the extension. This allowed the packaged path to compile DeepGEMM kernels with
+NVRTC instead of depending on host C++ standard-library headers at runtime.
+
+The first high-M comparison used W4A16 Marlin as the reference and reported
+
+```text
+calc_diff = 0.001113852751636557
+```
+
+`calc_diff` converts both tensors to FP64 and computes
+
+\[
+d(x,y)
+= 1 - \frac{2\sum_j x_jy_j}{\sum_j (x_j^2+y_j^2)}
+= \frac{\lVert x-y\rVert_2^2}
+       {\lVert x\rVert_2^2+\lVert y\rVert_2^2}.
+\]
+
+Zero denotes identical tensors. The established DeepGEMM unit-test comparison
+uses `d < 0.001`; that boundary was not changed. Marlin was not the matching
+high-branch oracle because it retains W4A16 arithmetic, while the high branch
+converts the resident weights to FP8, quantizes activations to FP8, and invokes
+grouped DeepGEMM.
+
+The native composition also differed from its actual Python DeepGEMM reference
+at the intermediate activation boundary. The fused native SiLU-plus-quantize
+operation kept different activation arithmetic and quantization behavior.
+Commit `c26551b19a` replaced it with the same two registered operations used by
+the established sequence: `_C::silu_and_mul` writes the BF16 intermediate into
+the reusable weight arena, then `_C::per_token_group_fp8_quant` produces the
+FP8 activation and scales. `W2` conversion overwrites that intermediate only
+after quantization. The commit also sizes the shared arena for the larger of
+the converted `W13` stack and this BF16 intermediate.
+
+Repeating the high-M comparison against Marlin after that correction produced
+
+```text
+calc_diff = 0.0011665152362726472
+```
+
+The value demonstrates the cross-backend W4A16-versus-FP8 numerical drift; it
+is not a measure of native-versus-prototype agreement. The final test therefore
+uses Marlin as the below-knee oracle and the Python DeepGEMM prototype as the
+at-knee oracle.
+
+H100 job `6170209` ran both `M=127` and `M=128` for `M_knee=128`, local and
+expert-parallel routing, and router-weight-on-input disabled and enabled. Its
+output tensor aliased the start of the shared arena in every case. DeepGEMM
+compiled three SM90a kernels through NVRTC. All eight branch/routing/weighting
+combinations passed their matching reference, and the job emitted:
+
+```text
+native-low-high-ep-router-alias-ok
+```

@@ -31,8 +31,9 @@ scratch use alone does not count as a win.
 - A staged end-to-end win means lower CUDA latency than W4A16 at the same
   `(M,N,K)`.  Model evaluation must also be reported for a production change.
 
-No Triton timing is used anywhere below.  Every performance number is CUDA
-unless explicitly marked as an invalid or failed run.
+Dense-kernel sections use CUDA timings. Later MoE sections explicitly identify
+the production Triton routes they measure; all performance numbers name their
+backend and measurement protocol.
 
 ## Benchmark protocols
 
@@ -3255,3 +3256,104 @@ selection of unrelated backends. The adaptive service retains runtime M
 selection, the `floor(256 * global_experts / top_k) + 1` MoE knee, and Marlin
 dispatch for marked router gates. Native NVFP4 W4A4 remains on its existing
 path. Slurm accepted the graph under job IDs 6166687 through 6166885.
+
+## 64. Production staged-Triton CUDA-graph curves
+
+CudaGym runs `q3-final-overlay-triton-production-r10` and
+`q36-final-overlay-triton-production-r9` measured the production high-M MoE
+route with `VLLM_USE_DEEP_GEMM=0`. The hybrid leg therefore includes NVFP4
+weight conversion and the production staged-Triton implementation. For each
+backend, the driver made three eager warmup calls, captured 10 calls in one
+CUDA graph, replayed that graph five times for warmup, then reported the median
+of 30 CUDA-event samples divided by 10. It timed one Marlin graph followed by
+one hybrid graph; it did not retain the individual samples or perform A/B/A.
+
+The Q3 balanced cyclic results were:
+
+| M | Mean rows/expert | Marlin ms | Hybrid ms | Marlin / hybrid - 1 |
+|---:|---:|---:|---:|---:|
+| 3,072 | 192 | 1.074907 | 0.993976 | +8.142% |
+| 3,584 | 224 | 1.385997 | 1.140187 | +21.559% |
+| 4,080 | 255 | 1.405494 | 1.181037 | +19.005% |
+| 4,096 | 256 | 1.424488 | 1.182646 | +20.449% |
+| 4,112 | 257 | 1.683333 | 1.297443 | +29.742% |
+| 4,352 | 272 | 1.718410 | 1.311562 | +31.020% |
+| 4,608 | 288 | 1.736202 | 1.330493 | +30.493% |
+| 4,864 | 304 | 1.751750 | 1.349811 | +29.777% |
+| 5,120 | 320 | 1.765330 | 1.371443 | +28.721% |
+| 6,144 | 384 | 2.108510 | 1.565053 | +34.725% |
+| 7,168 | 448 | 2.444494 | 1.755896 | +39.216% |
+| 8,192 | 512 | 2.787758 | 1.948053 | +43.105% |
+
+The Q36 balanced cyclic route used all 256 experts:
+
+| M | Active experts | Mean rows/expert | Marlin ms | Hybrid ms | Marlin / hybrid - 1 |
+|---:|---:|---:|---:|---:|---:|
+| 4,096 | 256 | 128 | 1.048419 | 1.130374 | -7.250% |
+| 5,120 | 256 | 160 | 1.505234 | 1.338438 | +12.462% |
+| 6,144 | 256 | 192 | 1.559254 | 1.403866 | +11.069% |
+| 7,168 | 256 | 224 | 2.002179 | 1.622056 | +23.435% |
+| 8,160 | 256 | 255 | 2.044622 | 1.686422 | +21.240% |
+| 8,192 | 256 | 256 | 2.045811 | 1.689619 | +21.081% |
+| 8,193 | 256 | 256.03125 | 2.058576 | 1.694854 | +21.460% |
+| 8,224 | 256 | 257 | 2.437675 | 1.839550 | +32.515% |
+| 9,216 | 256 | 288 | 2.482307 | 1.896320 | +30.901% |
+| 10,240 | 256 | 320 | 2.526370 | 1.959565 | +28.925% |
+| 12,288 | 256 | 384 | 3.014123 | 2.245864 | +34.208% |
+| 14,336 | 256 | 448 | 3.505235 | 2.528990 | +38.602% |
+| 16,384 | 256 | 512 | 3.994112 | 2.829040 | +41.183% |
+
+The Q36 half route used experts 0 through 127:
+
+| M | Active experts | Mean rows/active expert | Marlin ms | Hybrid ms | Marlin / hybrid - 1 |
+|---:|---:|---:|---:|---:|---:|
+| 4,096 | 128 | 256 | 1.043522 | 1.070299 | -2.502% |
+| 5,120 | 128 | 320 | 1.280973 | 1.223163 | +4.726% |
+| 6,144 | 128 | 384 | 1.536710 | 1.368163 | +12.319% |
+| 7,168 | 128 | 448 | 1.795974 | 1.508438 | +19.062% |
+| 8,160 | 128 | 510 | 2.034394 | 1.660363 | +22.527% |
+| 8,192 | 128 | 512 | 2.036589 | 1.662685 | +22.488% |
+| 8,193 | 128 | 512.0625 | 2.051434 | 1.667142 | +23.051% |
+| 8,224 | 128 | 514 | 2.228566 | 1.728426 | +28.936% |
+| 9,216 | 128 | 576 | 2.271157 | 1.788574 | +26.981% |
+| 10,240 | 128 | 640 | 2.516477 | 1.932982 | +30.186% |
+| 12,288 | 128 | 768 | 3.006238 | 2.217421 | +35.574% |
+| 14,336 | 128 | 896 | 3.498912 | 2.492550 | +40.375% |
+| 16,384 | 128 | 1,024 | 3.986341 | 2.784693 | +43.152% |
+
+For Q36, the model-independent formula gives
+`M_knee = floor(256 * E / top_k) + 1 = 8,193`. The balanced cyclic route has
+256 rows on every expert at 8,192. Its next input contains 65,544 routes, so at
+8,193 eight experts have 257 rows and 248 have 256. At 8,224 every expert has
+257 rows and the Marlin tile step is visible: the hybrid gain increases from
++21.460% at 8,193 to +32.515%. The curve also shows why this is a conservative
+shape rule rather than a fitted crossover. In this run balanced Q36 first won
+at the sampled 5,120 point, while half routing crossed between 4,096 and 5,120.
+The runtime rule nevertheless retains global `E=256` for both distributions;
+it does not specialize a previously unseen model from this synthetic route.
+
+The benchmark emitted output-comparison metrics for every row, but it did not
+apply an acceptance threshold. The exact `max_abs`, relative-L2, and cosine
+values are retained as numerical comparisons, not labeled as a correctness
+pass.
+
+Durable inputs and provenance are:
+
+- `results/moe-production-curves/q3-r10.jsonl`: source revision `96c8e4edc4`,
+  stdout SHA-256 `be3353028257980d9024560419b29dca6a0f3a654965edaeac82eca1be0fcc49`;
+- `results/moe-production-curves/q36-r9.jsonl`: source revision
+  `1dd3996c6f53ce31b12d31bdea342858a1ee1a65`, stdout SHA-256
+  `5d2ad4642eb10ba40e3f41a18dc34c7545854328ee9d2092885183c0555677f2`;
+- both used driver SHA-256
+  `82f8452dcbcac7830e45ce9c9798db20e7fcf12dec1f5a5f4f2cd728dd5f1107`
+  and overlay `native-overlay-9340d68ade-r1` on an NVIDIA H100;
+- the source output directories are recorded in each JSONL metadata row, and
+  `results/moe-production-curves/plot.py` regenerates the combined SVG.
+
+![Q3 and Q36 production MoE curves](results/moe-production-curves/q3-q36-r10-r9.svg)
+
+*Production staged-Triton versus W4A16 Marlin under CUDA-graph replay. The top
+axes are arithmetic means from the synthetic cyclic route, not real serving
+histograms; Q36 half routing averages across only its 128 active experts.
+Connected lines show sampled points only. The retained medians provide no
+error bars or component breakdown.*

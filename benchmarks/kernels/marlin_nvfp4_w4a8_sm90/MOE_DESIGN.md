@@ -533,6 +533,102 @@ selector used vLLM's default MoE config. Raw results are under
 `.benchmark/cudagym-nvfp4-moe-q36-curve-r2-20260818/` and
 `.benchmark/cudagym-nvfp4-moe-q36-triton-curve-r2-20260818/`.
 
+### Production staged-Triton CUDA-graph curves
+
+Two later runs forced the production high-M branch while setting
+`VLLM_USE_DEEP_GEMM=0`, so the hybrid measurements below include NVFP4 weight
+conversion and the production staged-Triton MoE route. Each backend received
+three eager warmups; one graph captured 10 calls; five graph replays warmed the
+capture; and the reported latency is the median of 30 CUDA-event replay
+samples divided by 10. This was one Marlin graph followed by one hybrid graph,
+not an A/B/A series, and the retained data do not contain raw samples or error
+bars.
+
+The Q3 balanced cyclic curve was:
+
+| M | Mean rows/expert | Marlin ms | Hybrid ms | Marlin / hybrid - 1 |
+|---:|---:|---:|---:|---:|
+| 3,072 | 192 | 1.074907 | 0.993976 | +8.142% |
+| 3,584 | 224 | 1.385997 | 1.140187 | +21.559% |
+| 4,080 | 255 | 1.405494 | 1.181037 | +19.005% |
+| 4,096 | 256 | 1.424488 | 1.182646 | +20.449% |
+| 4,112 | 257 | 1.683333 | 1.297443 | +29.742% |
+| 4,352 | 272 | 1.718410 | 1.311562 | +31.020% |
+| 4,608 | 288 | 1.736202 | 1.330493 | +30.493% |
+| 4,864 | 304 | 1.751750 | 1.349811 | +29.777% |
+| 5,120 | 320 | 1.765330 | 1.371443 | +28.721% |
+| 6,144 | 384 | 2.108510 | 1.565053 | +34.725% |
+| 7,168 | 448 | 2.444494 | 1.755896 | +39.216% |
+| 8,192 | 512 | 2.787758 | 1.948053 | +43.105% |
+
+Q36 balanced routing cycled over all 256 experts:
+
+| M | Active experts | Mean rows/expert | Marlin ms | Hybrid ms | Marlin / hybrid - 1 |
+|---:|---:|---:|---:|---:|---:|
+| 4,096 | 256 | 128 | 1.048419 | 1.130374 | -7.250% |
+| 5,120 | 256 | 160 | 1.505234 | 1.338438 | +12.462% |
+| 6,144 | 256 | 192 | 1.559254 | 1.403866 | +11.069% |
+| 7,168 | 256 | 224 | 2.002179 | 1.622056 | +23.435% |
+| 8,160 | 256 | 255 | 2.044622 | 1.686422 | +21.240% |
+| 8,192 | 256 | 256 | 2.045811 | 1.689619 | +21.081% |
+| 8,193 | 256 | 256.03125 | 2.058576 | 1.694854 | +21.460% |
+| 8,224 | 256 | 257 | 2.437675 | 1.839550 | +32.515% |
+| 9,216 | 256 | 288 | 2.482307 | 1.896320 | +30.901% |
+| 10,240 | 256 | 320 | 2.526370 | 1.959565 | +28.925% |
+| 12,288 | 256 | 384 | 3.014123 | 2.245864 | +34.208% |
+| 14,336 | 256 | 448 | 3.505235 | 2.528990 | +38.602% |
+| 16,384 | 256 | 512 | 3.994112 | 2.829040 | +41.183% |
+
+Q36 half routing cycled over experts 0 through 127:
+
+| M | Active experts | Mean rows/active expert | Marlin ms | Hybrid ms | Marlin / hybrid - 1 |
+|---:|---:|---:|---:|---:|---:|
+| 4,096 | 128 | 256 | 1.043522 | 1.070299 | -2.502% |
+| 5,120 | 128 | 320 | 1.280973 | 1.223163 | +4.726% |
+| 6,144 | 128 | 384 | 1.536710 | 1.368163 | +12.319% |
+| 7,168 | 128 | 448 | 1.795974 | 1.508438 | +19.062% |
+| 8,160 | 128 | 510 | 2.034394 | 1.660363 | +22.527% |
+| 8,192 | 128 | 512 | 2.036589 | 1.662685 | +22.488% |
+| 8,193 | 128 | 512.0625 | 2.051434 | 1.667142 | +23.051% |
+| 8,224 | 128 | 514 | 2.228566 | 1.728426 | +28.936% |
+| 9,216 | 128 | 576 | 2.271157 | 1.788574 | +26.981% |
+| 10,240 | 128 | 640 | 2.516477 | 1.932982 | +30.186% |
+| 12,288 | 128 | 768 | 3.006238 | 2.217421 | +35.574% |
+| 14,336 | 128 | 896 | 3.498912 | 2.492550 | +40.375% |
+| 16,384 | 128 | 1,024 | 3.986341 | 2.784693 | +43.152% |
+
+The Q36 formula knee is
+`floor(256 * 256 / 8) + 1 = 8,193`. At `M=8,192`, balanced routing has exactly
+256 rows per expert. At `M=8,193`, the cyclic route gives eight experts 257
+rows and the other 248 experts 256 rows, so the selector changes branch at the
+first input that cannot keep every expert at or below 256. The fully balanced
+257-row point is `M=8,224`, where the Marlin step raises the measured hybrid
+gain from +21.460% at 8,193 to +32.515%.
+
+This graph curve also shows that 8,193 is a conservative shape rule, not a
+best-fit Q36 crossover: balanced staged Triton was already faster at the
+sampled `M=5,120`, and the concentrated half route crossed between 4,096 and
+5,120. The selector intentionally uses global `E` rather than an observed
+active-expert count, so both routing patterns retain the same model-independent
+8,193 boundary. Likewise, the Q3 formula boundary is 4,097 even though this
+particular graph run measured a +20.449% hybrid gain at 4,096. That result
+supersedes any general claim that choosing either backend at the adjacent Q3
+point is necessarily inconsequential.
+
+The run emitted `max_abs`, relative-L2, and cosine comparisons against Marlin
+for every point, but it applied no numerical acceptance threshold. Those
+fields are recorded as comparison data rather than described as a correctness
+pass. Exact JSONL, hashes, source paths, and the plotting program are under
+`results/moe-production-curves/`.
+
+![Q3 and Q36 production MoE curves](results/moe-production-curves/q3-q36-r10-r9.svg)
+
+*Production staged-Triton versus W4A16 Marlin under CUDA-graph replay. The top
+axes show the arithmetic mean for the synthetic cyclic route, not a measured
+serving histogram. Q36 half routing averages only across its 128 active
+experts. Lines connect sampled points and do not imply interpolation; no error
+bars are available from these retained medians.*
+
 ## Runtime selector
 
 The Q3 and Q36 cliffs agree on the first input M whose mean routed residency
@@ -546,9 +642,10 @@ M_{\text{knee}}
 The outer hybrid uses the concrete, post-dispatch `M` on every invocation and
 selects FP8 when `M >= M_knee`; Q3 therefore uses 4097 and Q36 uses 8193. This
 rule depends on global logical expert count and top-k, not a model name or a
-fitted layer identity. A mistake at the adjacent 256-row point has little
-practical regret: the Q3 difference is about 0.3%, even when enough samples
-resolve it.
+fitted layer identity. The earlier sequential DeepGEMM curve differed by about
+0.3% at Q3's adjacent 256-row point; the later production staged-Triton graph
+curve measured +20.449% there, so regret at the boundary is backend- and
+protocol-dependent rather than a property of the formula.
 
 After the outer M decision, the FP8 implementation is selected from the actual
 local `K` and `N`, activation, and available backend. SILU shapes with

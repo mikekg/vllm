@@ -196,7 +196,7 @@ def run_shape(
     hybrid.process_weights_after_loading(layer)
     if not production_only:
         block_w1, block_w2, block_quant = make_block_fp8_weights(layer, quant)
-    hybrid.m_knee = 1
+    hybrid.m_knee = 128 if production_only else 1
     marlin = make_kernel(config, quant, hybrid.fallback_experts)
     cutlass = make_kernel(config, hybrid.quant_config, hybrid)
     if not production_only:

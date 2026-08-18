@@ -3269,6 +3269,17 @@ and OCI revision `d74fe5d34` resolve `srun` before sourcing that config; the
 shared launch wrapper was updated before the authoritative campaign redo.
 Startup-only outputs from the earlier invocation are not result evidence.
 
+Already-copied queued configs were repaired without cancellation or
+resubmission by prepending `/cm/shared/apps/slurm/current/bin` to `PATH`. Each
+root retains `path-repair/{before.sha256,after.sha256,repair.meta}`:
+
+| Root under `$W4_ROOT` | Repaired configs |
+|---|---:|
+| `runs/unseen-9340d68ade-20260818-r1` | 110 |
+| `campaigns/unseen-919b24dac-20260818-r1` | 110 |
+| `campaigns/unseen-919b24dac-20260818-r1-high1` | 154 |
+| `campaigns/unseen-919b24dac-20260818-r1-gsm-resume1` | 112 |
+
 ## 64. Production staged-Triton CUDA-graph curves
 
 CudaGym runs `q3-final-overlay-triton-production-r10` and
@@ -3475,9 +3486,10 @@ the following hold; an existing tighter model gate takes precedence:
 2. Its point accuracy delta versus A is at least `-0.5` percentage point. This
    is the project hybrid-loss margin adopted here.
 3. The paired one-sided 95% lower confidence bound for candidate minus A is
-   greater than `-1.0` percentage point. The predeclared calculation resamples
-   whole paired question records 100,000 times with seed 42 and takes the
-   fifth percentile.
+   greater than `-1.0` percentage point. The evaluator draws 200,000 paired
+   multinomial bootstrap samples with seed 0. It emits the two-sided 2.5/97.5
+   percentile interval as `delta_pp_ci95` and the one-sided fifth-percentile
+   lower bound as `delta_pp_lower95`.
 4. It has no exact-McNemar significant regression at alpha `0.05` and no
    increase in invalid-answer count.
 

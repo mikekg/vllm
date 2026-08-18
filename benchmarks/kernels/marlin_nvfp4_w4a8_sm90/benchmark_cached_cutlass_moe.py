@@ -42,7 +42,12 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 )
 from vllm.v1.worker.workspace import init_workspace_manager
 
-SHAPES = {"q3m": (128, 768, 2048, 8), "q36m": (256, 512, 2048, 8)}
+SHAPES = {
+    "q3m": (128, 768, 2048, 8),
+    "q36m": (256, 512, 2048, 8),
+    "deepseek_v4_flash": (256, 2048, 4096, 6),
+    "deepseek_v4_pro": (384, 3072, 7168, 6),
+}
 DEFAULT_MS = (1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192)
 ROUTINGS = {"balanced": 1, "half": 2, "quarter": 4}
 
@@ -170,7 +175,12 @@ def graph_us(fn, calls: int = 10, samples: int = 30) -> float:
     return statistics.median(times)
 
 
-def run_shape(name: str, ms: list[int], routings: list[str]) -> None:
+def run_shape(
+    name: str,
+    ms: list[int],
+    routings: list[str],
+    production_only: bool = False,
+) -> None:
     e, n, k, topk = SHAPES[name]
     config = make_dummy_moe_config(
         num_experts=e,
@@ -184,18 +194,22 @@ def run_shape(name: str, ms: list[int], routings: list[str]) -> None:
     layer, quant = make_weights(e, n, k)
     hybrid = NvFp4ByCopyExperts(config, quant)
     hybrid.process_weights_after_loading(layer)
-    block_w1, block_w2, block_quant = make_block_fp8_weights(layer, quant)
+    if not production_only:
+        block_w1, block_w2, block_quant = make_block_fp8_weights(layer, quant)
     hybrid.m_knee = 1
     marlin = make_kernel(config, quant, hybrid.fallback_experts)
     cutlass = make_kernel(config, hybrid.quant_config, hybrid)
-    block = make_kernel(
-        config, block_quant, TritonOrDeepGemmExperts(config, block_quant)
-    )
-    deepgemm = make_kernel(config, block_quant, DeepGemmExperts(config, block_quant))
-    triton = make_kernel(config, block_quant, TritonExperts(config, block_quant))
-    flashinfer = make_kernel(
-        config, block_quant, FlashInferExperts(config, block_quant)
-    )
+    if not production_only:
+        block = make_kernel(
+            config, block_quant, TritonOrDeepGemmExperts(config, block_quant)
+        )
+        deepgemm = make_kernel(
+            config, block_quant, DeepGemmExperts(config, block_quant)
+        )
+        triton = make_kernel(config, block_quant, TritonExperts(config, block_quant))
+        flashinfer = make_kernel(
+            config, block_quant, FlashInferExperts(config, block_quant)
+        )
 
     for m in ms:
         generator = torch.Generator(device="cuda").manual_seed(m)
@@ -237,6 +251,43 @@ def run_shape(name: str, ms: list[int], routings: list[str]) -> None:
 
             run_marlin = partial(apply, marlin)
             run_cutlass = partial(apply, cutlass)
+            reference = run_marlin().clone()
+            candidate = run_cutlass().clone()
+            if production_only:
+                error = (candidate.float() - reference.float()).abs()
+                ref_norm = torch.linalg.vector_norm(reference.float())
+                cosine = torch.nn.functional.cosine_similarity(
+                    reference.float().flatten(), candidate.float().flatten(), dim=0
+                )
+                marlin_us = graph_us(run_marlin)
+                cutlass_us = graph_us(run_cutlass)
+                print(
+                    json.dumps(
+                        {
+                            "shape": name,
+                            "routing": routing,
+                            "active_experts": active_experts,
+                            "mean_routed_rows": m * topk / active_experts,
+                            "E": e,
+                            "M": m,
+                            "N": n,
+                            "K": k,
+                            "topk": topk,
+                            "marlin_us": marlin_us,
+                            "hybrid_us": cutlass_us,
+                            "cutlass_us": cutlass_us,
+                            "speedup": marlin_us / cutlass_us,
+                            "max_abs": error.max().item(),
+                            "relative_l2": (
+                                torch.linalg.vector_norm(error) / ref_norm
+                            ).item(),
+                            "cosine": cosine.item(),
+                        }
+                    ),
+                    flush=True,
+                )
+                continue
+
             run_block = partial(apply, block, block_w1, block_w2)
             run_triton = partial(apply, triton, block_w1, block_w2)
             run_flashinfer = partial(apply, flashinfer, block_w1, block_w2)
@@ -262,8 +313,6 @@ def run_shape(name: str, ms: list[int], routings: list[str]) -> None:
                 )
                 return apply(deepgemm, block_w1, block_w2)
 
-            reference = run_marlin().clone()
-            candidate = run_cutlass().clone()
             block_candidate = run_block().clone()
             triton_candidate = run_triton().clone()
             flashinfer_candidate = run_flashinfer().clone()
@@ -353,13 +402,14 @@ def run_shape(name: str, ms: list[int], routings: list[str]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--shapes", nargs="+", choices=SHAPES, default=SHAPES)
+    parser.add_argument("--shapes", nargs="+", choices=SHAPES, default=("q3m", "q36m"))
     parser.add_argument("--m", nargs="+", type=int, default=DEFAULT_MS)
     parser.add_argument("--routing", nargs="+", choices=ROUTINGS, default=ROUTINGS)
+    parser.add_argument("--production-only", action="store_true")
     args = parser.parse_args()
     init_workspace_manager(torch.accelerator.current_device_index())
     for shape in args.shapes:
-        run_shape(shape, args.m, args.routing)
+        run_shape(shape, args.m, args.routing, args.production_only)
 
 
 if __name__ == "__main__":

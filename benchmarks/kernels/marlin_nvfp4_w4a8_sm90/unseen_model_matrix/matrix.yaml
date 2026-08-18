@@ -38,6 +38,13 @@ models:
     model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/cutlass/e2m1/data/huggingface_models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
     repo: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
     revision: ce1b118ae66ec705d02c241525192832eb045fd3
+    accuracy_threshold: 0.29
+    accuracy_threshold_evidence: exact model_name in tests/evals/gsm8k/configs/moe-refactor/Nemotron-Nano-30B-NvFp4-ModelOpt-fi-cutlass.yaml; eval config does not pin a revision
+    original_model:
+      repo: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      revision: 378df16e4b54901a3f514f38ea9a34db9d061634
+      precision: BF16
+      evidence: complete local Hugging Face snapshot; all 13 indexed shards resolve and architecture dimensions match
     topology:
       engine_tp: 1
       enable_expert_parallel: false
@@ -54,6 +61,10 @@ models:
     model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/cutlass/e2m1/data/huggingface_models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
     repo: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
     revision: 4f0cf9daaeb7a4d5e23f80a00e7ed15f0e03caf6
+    accuracy_threshold: 0.93
+    accuracy_threshold_evidence: exact model_name in tests/evals/gsm8k/configs/Nemotron-3-Super-120B-A12B-NVFP4.yaml; eval config does not pin a revision
+    original_model: null
+    original_model_reason: exact BF16 repo appears in an eval config, but no revision-backed local snapshot is available
     topology:
       engine_tp: 2
       enable_expert_parallel: true
@@ -70,6 +81,10 @@ models:
     model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/cutlass/e2m1/data/huggingface_models/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
     repo: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
     revision: null
+    accuracy_threshold: null
+    accuracy_threshold_reason: no GSM8K config has this exact model_name
+    original_model: null
+    original_model_reason: no exact BF16 or FP16 repo and revision are available locally
     topology:
       engine_tp: 8
       enable_expert_parallel: true
@@ -86,6 +101,10 @@ models:
     model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/mmpareto/hfcache/DeepSeek-R1-0528-NVFP4
     repo: nvidia/DeepSeek-R1-0528-NVFP4
     revision: null
+    accuracy_threshold: null
+    accuracy_threshold_reason: existing thresholds target deepseek-ai/DeepSeek-R1, not this repo or the 0528 NVFP4 variant
+    original_model: null
+    original_model_reason: cached deepseek-ai/DeepSeek-R1 is not an exact 0528 parent, and no exact parent revision is available locally
     topology:
       engine_tp: 8
       enable_expert_parallel: true
@@ -102,6 +121,10 @@ models:
     model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/mmpareto/hfcache/DeepSeek-V4-Flash-NVFP4
     repo: local-cache/DeepSeek-V4-Flash-NVFP4
     revision: null
+    accuracy_threshold: null
+    accuracy_threshold_reason: existing configs target amd and deepseek-ai repos; the local-cache identity has no exact config
+    original_model: null
+    original_model_reason: the flat local cache records no BF16 or FP16 parent repo and revision
     topology:
       engine_tp: 4
       enable_expert_parallel: true
@@ -118,6 +141,10 @@ models:
     model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/mmpareto/hfcache/DeepSeek-V4-Pro-NVFP4
     repo: local-cache/DeepSeek-V4-Pro-NVFP4
     revision: null
+    accuracy_threshold: null
+    accuracy_threshold_reason: the existing config targets amd/DeepSeek-V4-Pro-NVFP4, not this local-cache identity
+    original_model: null
+    original_model_reason: the flat local cache records no BF16 or FP16 parent repo and revision
     topology:
       engine_tp: 16
       enable_expert_parallel: true
@@ -134,6 +161,10 @@ models:
     model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/mmpareto/hfcache/Qwen3.5-397B-A17B-NVFP4
     repo: nvidia/Qwen3.5-397B-A17B-NVFP4
     revision: null
+    accuracy_threshold: 0.88
+    accuracy_threshold_evidence: exact model_name in tests/evals/gsm8k/configs/Qwen3.5-397B-A17B-NVFP4-DEP2.yaml; eval config does not pin a revision
+    original_model: null
+    original_model_reason: no exact BF16 or FP16 parent snapshot with a recorded revision is available locally
     topology:
       engine_tp: 4
       enable_expert_parallel: false
@@ -154,6 +185,10 @@ models:
     model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/cutlass/e2m1/data/huggingface_models/nvidia/Qwen3.6-35B-A3B-NVFP4
     repo: nvidia/Qwen3.6-35B-A3B-NVFP4
     revision: 491c2f1ea524c639598bf8fa787a93fed5a6fbce
+    accuracy_threshold: null
+    accuracy_threshold_reason: the only Qwen3.6 NVFP4 config targets RedHatAI/Qwen3.6-35B-A3B-NVFP4, not this repo
+    original_model: null
+    original_model_reason: no exact BF16 or FP16 parent snapshot with a recorded revision is available locally
     topology:
       engine_tp: 1
       enable_expert_parallel: false
@@ -170,6 +205,10 @@ models:
     model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/cutlass/e2m1/data/huggingface_models/nvidia/Gemma-4-26B-A4B-NVFP4
     repo: nvidia/Gemma-4-26B-A4B-NVFP4
     revision: a19cfe00be84568a6867111c9a68c9c44fdcffe6
+    accuracy_threshold: null
+    accuracy_threshold_reason: no GSM8K config has this exact model_name
+    original_model: null
+    original_model_reason: local references name a Google BF16 model but provide no revision-backed local snapshot
     topology:
       engine_tp: 1
       enable_expert_parallel: false
@@ -186,6 +225,10 @@ models:
     model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/cutlass/e2m1/data/huggingface_models/nvidia/NVIDIA-Nemotron-3-Nano-4B-NVFP4
     repo: nvidia/NVIDIA-Nemotron-3-Nano-4B-NVFP4
     revision: 2fdedbed2ab7614cf2be14bea35d880e59e91580
+    accuracy_threshold: null
+    accuracy_threshold_reason: no GSM8K config has this exact model_name
+    original_model: null
+    original_model_reason: the BF16 repo is referenced by tests but has no revision-backed local snapshot
     topology:
       engine_tp: 1
       enable_expert_parallel: false
@@ -201,6 +244,10 @@ models:
     model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/cutlass/e2m1/data/huggingface_models/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
     repo: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
     revision: null
+    accuracy_threshold: null
+    accuracy_threshold_reason: no GSM8K config has this exact model_name
+    original_model: null
+    original_model_reason: the BF16 repo is referenced by tests but has no revision-backed local snapshot
     topology:
       engine_tp: 1
       enable_expert_parallel: false

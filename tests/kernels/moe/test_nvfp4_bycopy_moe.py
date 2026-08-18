@@ -169,6 +169,7 @@ def test_enabled_path_binds_codes_and_reserves_all_backends(monkeypatch):
         w2_weight=torch.empty((2, 1)),
         w13_fp8_scale_divisor_code=w13_codes,
         w2_fp8_scale_divisor_code=w2_codes,
+        workspace=torch.empty(1, dtype=torch.int32),
     )
     reserve = MagicMock()
     monkeypatch.setattr(
@@ -184,6 +185,78 @@ def test_enabled_path_binds_codes_and_reserves_all_backends(monkeypatch):
     for implementation in implementations:
         implementation.workspace_shapes.assert_called_once()
     reserve.assert_called_once_with(1280)
+
+
+def test_native_outer_op_receives_both_resident_branches(monkeypatch):
+    e, m, n, k, topk = 2, 4, 512, 128, 1
+    config = _config(e=e, p=n, k=k, topk=topk)
+    w13_scale = torch.empty((e, k // 16, 2 * n), dtype=torch.bfloat16)
+    w2_scale = torch.empty((e, n // 16, k), dtype=torch.bfloat16)
+    w13_global = torch.ones(e)
+    w2_global = torch.ones(e)
+    quant_config = nvfp4_w4a16_moe_quant_config(
+        w13_global, w2_global, w13_scale, w2_scale
+    )
+    experts = NvFp4ByCopyExperts(config, quant_config)
+    experts.m_knee = 8
+    experts.marlin_workspace = torch.empty(4, dtype=torch.int32)
+    experts.w13_fp8_scale_divisor_code = torch.ones(
+        (e, 2 * n // 128, k // 128), dtype=torch.uint8
+    )
+    experts.w2_fp8_scale_divisor_code = torch.ones(
+        (e, k // 128, n // 128), dtype=torch.uint8
+    )
+    native = MagicMock()
+    monkeypatch.setattr(torch.ops._C, "marlin_nvfp4_hybrid_moe", native, raising=False)
+    monkeypatch.setattr(
+        nvfp4_bycopy_moe, "_deepgemm_shape_supported", lambda *args: True
+    )
+
+    workspace13_shape, workspace2_shape, output_shape = experts.workspace_shapes(
+        m, n, k, topk, e, e, None, MoEActivation.SILU
+    )
+    hidden = torch.empty((m, k), dtype=torch.bfloat16)
+    w13 = torch.empty((e, k // 16, 4 * n), dtype=torch.int32)
+    w2 = torch.empty((e, n // 16, 2 * k), dtype=torch.int32)
+    topk_weights = torch.ones((m, topk), dtype=torch.float32)
+    topk_ids = torch.zeros((m, topk), dtype=torch.int64)
+    output = torch.empty(output_shape, dtype=torch.bfloat16)
+    workspace13 = torch.empty(workspace13_shape, dtype=torch.bfloat16)
+
+    experts.apply(
+        output,
+        hidden,
+        w13,
+        w2,
+        topk_weights,
+        topk_ids,
+        MoEActivation.SILU,
+        e,
+        None,
+        None,
+        None,
+        workspace13,
+        torch.empty(workspace2_shape, dtype=torch.bfloat16),
+        None,
+        False,
+    )
+
+    native.assert_called_once()
+    args = native.call_args.args
+    assert args[:3] == (hidden, w13, w2)
+    assert args[3:9] == (
+        w13_scale,
+        w2_scale,
+        w13_global,
+        w2_global,
+        experts.w13_fp8_scale_divisor_code,
+        experts.w2_fp8_scale_divisor_code,
+    )
+    assert args[12] is experts.marlin_workspace
+    assert args[13] is output
+    assert args[14] is workspace13
+    assert args[15:] == (e, experts.m_knee, False)
+    assert workspace2_shape == (0,)
 
 
 def test_support_accepts_tp_and_pure_ep_but_rejects_dp(monkeypatch):

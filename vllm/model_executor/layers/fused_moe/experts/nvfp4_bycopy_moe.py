@@ -114,6 +114,65 @@ def _marlin_problem_size(
     return e, m, n, k, topk_ids.size(1)
 
 
+def _native_moe_arena_bytes(
+    m: int,
+    n: int,
+    k: int,
+    topk: int,
+    global_num_experts: int,
+    local_num_experts: int,
+    dtype: torch.dtype,
+) -> int:
+    routes = m * topk
+    itemsize = dtype.itemsize
+
+    effective_m = (m * local_num_experts + global_num_experts - 1) // (
+        global_num_experts
+    )
+    marlin_block = 64
+    for candidate in (8, 16, 32, 48, 64):
+        marlin_block = candidate
+        if 10 * effective_m * topk < 9 * local_num_experts * candidate:
+            break
+    padded_routes = routes + global_num_experts * (marlin_block - 1)
+    if routes < global_num_experts:
+        padded_routes = min(routes * marlin_block, padded_routes)
+
+    def append(offset: int, size: int) -> int:
+        return round_up(offset, 256) + size
+
+    low = 0
+    low = append(low, max(m * k * itemsize, routes * n * itemsize))
+    low = append(low, routes * max(2 * n, k) * itemsize)
+    low = append(low, padded_routes * torch.int32.itemsize)
+    low = append(
+        low,
+        (padded_routes + marlin_block - 1) // marlin_block * torch.int32.itemsize,
+    )
+    low = append(low, torch.int32.itemsize)
+
+    block = 128
+    m_sum = round_up(routes + local_num_experts * (block - 1), block)
+    high = 0
+    high = append(high, max(m * k * itemsize, m * k, m_sum * n))
+    high = append(
+        high,
+        max(m * (k // block), (n // block) * m_sum, routes) * torch.float32.itemsize,
+    )
+    high = append(high, m_sum * k)
+    high = append(high, m_sum * (k // block) * torch.float32.itemsize)
+    high = append(high, m_sum * max(2 * n, k) * itemsize)
+    high = append(high, local_num_experts * 2 * n * k)
+    high = append(
+        high,
+        local_num_experts * (2 * n // block) * (k // block) * torch.float32.itemsize,
+    )
+    high = append(high, m_sum * torch.int32.itemsize)
+    high = append(high, routes * torch.int32.itemsize)
+    high = append(high, local_num_experts * torch.int32.itemsize)
+    return max(low, high)
+
+
 class NvFp4ToFp8TritonExperts(TritonExperts):
     """Stage Marlin NVFP4 weights through the existing Triton FP8 MoE."""
 
@@ -577,6 +636,9 @@ class NvFp4ByCopyExperts(FallbackExperts):
             moe_config.in_dtype,
             _moe_shape(moe_config),
         )
+        self.marlin_workspace: torch.Tensor | None = None
+        self.w13_fp8_scale_divisor_code: torch.Tensor | None = None
+        self.w2_fp8_scale_divisor_code: torch.Tensor | None = None
 
     @staticmethod
     def get_clses() -> tuple[
@@ -662,6 +724,13 @@ class NvFp4ByCopyExperts(FallbackExperts):
     def _use_bycopy(self, m: int) -> bool:
         return type(m) is int and self.m_knee is not None and m >= self.m_knee
 
+    def _use_native(self, n: int, k: int, activation: MoEActivation) -> bool:
+        return (
+            self.m_knee is not None
+            and _deepgemm_shape_supported(self.m_knee, n, k, activation)
+            and hasattr(torch.ops._C, "marlin_nvfp4_hybrid_moe")
+        )
+
     def workspace_shapes(
         self,
         M: int,
@@ -673,6 +742,24 @@ class NvFp4ByCopyExperts(FallbackExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        if global_num_experts == -1:
+            global_num_experts = local_num_experts
+        if self._use_native(N, K, activation):
+            arena_bytes = _native_moe_arena_bytes(
+                M,
+                N,
+                K,
+                topk,
+                global_num_experts,
+                local_num_experts,
+                self.moe_config.in_dtype,
+            )
+            itemsize = self.moe_config.in_dtype.itemsize
+            return (
+                ((arena_bytes + itemsize - 1) // itemsize,),
+                (0,),
+                (M, K),
+            )
         experts = self.experts if self._use_bycopy(M) else self.fallback_experts
         return experts.workspace_shapes(
             M,
@@ -683,6 +770,70 @@ class NvFp4ByCopyExperts(FallbackExperts):
             local_num_experts,
             expert_tokens_meta,
             activation,
+        )
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        _, _, n, k, _ = self.moe_problem_size(hidden_states, w1, w2, topk_ids)
+        if not self._use_native(n, k, activation):
+            return super().apply(
+                output,
+                hidden_states,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                activation,
+                global_num_experts,
+                expert_map,
+                a1q_scale,
+                a2_scale,
+                workspace13,
+                workspace2,
+                expert_tokens_meta,
+                apply_router_weight_on_input,
+            )
+
+        assert self.w1_scale is not None and self.w2_scale is not None
+        assert self.g1_alphas is not None and self.g2_alphas is not None
+        assert self.w13_fp8_scale_divisor_code is not None
+        assert self.w2_fp8_scale_divisor_code is not None
+        assert self.marlin_workspace is not None
+        torch.ops._C.marlin_nvfp4_hybrid_moe(
+            hidden_states,
+            w1,
+            w2,
+            self.w1_scale,
+            self.w2_scale,
+            self.g1_alphas,
+            self.g2_alphas,
+            self.w13_fp8_scale_divisor_code,
+            self.w2_fp8_scale_divisor_code,
+            topk_weights,
+            topk_ids,
+            expert_map,
+            self.marlin_workspace,
+            output,
+            workspace13,
+            global_num_experts,
+            self.m_knee,
+            apply_router_weight_on_input,
         )
 
     def _select_experts_impl(
@@ -701,6 +852,9 @@ class NvFp4ByCopyExperts(FallbackExperts):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.m_knee is None:
             return
+        self.marlin_workspace = layer.workspace
+        self.w13_fp8_scale_divisor_code = layer.w13_fp8_scale_divisor_code
+        self.w2_fp8_scale_divisor_code = layer.w2_fp8_scale_divisor_code
         for experts in (
             cast(NvFp4ToFp8TritonExperts, self.bycopy_experts.experts),
             cast(
@@ -718,6 +872,24 @@ class NvFp4ByCopyExperts(FallbackExperts):
         global_experts = self.moe_config.num_logical_experts
         local_experts = layer.w13_weight.size(0)
         dtype = self.moe_config.in_dtype
+
+        native_bytes = 0
+        if self._use_native(n, k, self.moe_config.activation):
+            native_bytes = round_up(
+                max(
+                    _native_moe_arena_bytes(
+                        m,
+                        n,
+                        k,
+                        topk,
+                        global_experts,
+                        local_experts,
+                        dtype,
+                    ),
+                    m * k * dtype.itemsize,
+                ),
+                256,
+            )
 
         def required_bytes(experts: mk.FusedMoEExpertsModular) -> int:
             workspace13, workspace2, output = experts.workspace_shapes(
@@ -738,6 +910,7 @@ class NvFp4ByCopyExperts(FallbackExperts):
 
         reserve_workspace_for_all_ubatches(
             max(
+                native_bytes,
                 required_bytes(self.bycopy_experts.experts),
                 required_bytes(self.bycopy_experts.fallback_experts),
                 required_bytes(self.fallback_experts),

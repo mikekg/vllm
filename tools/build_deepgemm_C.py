@@ -47,6 +47,7 @@ includes = [
     info["INCLUDEPY"],
     f"{cuda_home}/include",
     f"{cuda_home}/include/cccl",
+    str(vllm_root / "csrc"),
     str(src / "csrc"),
     str(src / "deep_gemm/include"),
     str(src / "third-party/cutlass/include"),

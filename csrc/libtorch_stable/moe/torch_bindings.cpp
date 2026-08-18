@@ -116,6 +116,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "moe_permute_sort_workspace_size(int num_expanded_rows, int n_expert) -> "
       "int");
 
+  m.def(
+      "deepgemm_moe_permute(Tensor input, Tensor input_scale, Tensor topk_ids, "
+      "Tensor? expert_map, int align_m, Tensor! permuted_input, Tensor! "
+      "permuted_scale, Tensor! expert_ids, Tensor! inv_perm, Tensor! "
+      "expert_offsets) -> ()");
+
   // Row shuffle for MoE
   m.def(
       "shuffle_rows(Tensor input_tensor, Tensor dst2src_map, Tensor! "

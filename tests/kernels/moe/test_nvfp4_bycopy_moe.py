@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.experts import nvfp4_bycopy_moe
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
 from vllm.model_executor.layers.fused_moe.experts.nvfp4_bycopy_moe import (
     NvFp4ByCopyExperts,
+    NvFp4ToFp8Experts,
     NvFp4ToFp8TritonExperts,
     _lookup_moe_m_knee,
 )
@@ -50,18 +51,30 @@ def _config(
 
 def test_universal_knee_and_post_dispatch_selection():
     assert (
-        _lookup_moe_m_knee("unknown GPU", torch.float16, (3, 704, 2112, 2, False))
-        == 512
-    )
-    assert (
-        _lookup_moe_m_knee("another GPU", torch.bfloat16, (256, 512, 2048, 8, True))
-        == 512
+        _lookup_moe_m_knee("unknown GPU", torch.float16, (128, 704, 2048, 8, True))
+        is None
     )
 
     experts = object.__new__(NvFp4ByCopyExperts)
-    experts.m_knee = 512
+    experts.m_knee = None
     assert not experts._use_bycopy(511)
-    assert experts._use_bycopy(512)
+    assert not experts._use_bycopy(8192)
+
+
+def test_deepgemm_selector_uses_runtime_m_and_static_layer_shape(monkeypatch):
+    experts = object.__new__(NvFp4ToFp8Experts)
+    experts.moe_config = _config()
+    experts.experts = MagicMock()
+    experts.fallback_experts = MagicMock()
+    supported = MagicMock(return_value=True)
+    monkeypatch.setattr(nvfp4_bycopy_moe, "_deepgemm_shape_supported", supported)
+
+    selected = experts._select_experts_impl(
+        torch.empty((6144, 1), device="meta"), MagicMock(), MagicMock()
+    )
+
+    assert selected is experts.experts
+    supported.assert_called_once_with(6144, 768, 2048, MoEActivation.SILU)
 
 
 def test_workspace_includes_padded_silu_and_one_overlaid_weight():
@@ -84,15 +97,38 @@ def test_workspace_includes_padded_silu_and_one_overlaid_weight():
     assert gated[0] * torch.bfloat16.itemsize == prefix + weight + scale
 
 
-def test_composite_binds_tile_divisor_codes(monkeypatch):
+def test_disabled_path_does_not_bind_or_reserve_workspace():
+    experts = object.__new__(NvFp4ByCopyExperts)
+    experts.m_knee = None
+    experts.bycopy_experts = MagicMock()
+    experts.fallback_experts = MagicMock()
+    experts.bycopy_experts.w13_fp8_scale_divisor_code = None
+    experts.bycopy_experts.w2_fp8_scale_divisor_code = None
+
+    experts.process_weights_after_loading(MagicMock())
+
+    assert experts.bycopy_experts.w13_fp8_scale_divisor_code is None
+    assert experts.bycopy_experts.w2_fp8_scale_divisor_code is None
+    experts.bycopy_experts.workspace_shapes.assert_not_called()
+    experts.fallback_experts.workspace_shapes.assert_not_called()
+
+
+def test_enabled_path_binds_codes_and_reserves_all_backends(monkeypatch):
     experts = object.__new__(NvFp4ByCopyExperts)
     experts.m_knee = 1
     experts.moe_config = _config(e=2, p=128, k=128, topk=1)
     experts.bycopy_experts = MagicMock()
+    experts.bycopy_experts.experts = MagicMock()
+    experts.bycopy_experts.fallback_experts = MagicMock()
     experts.fallback_experts = MagicMock()
-    for implementation in (experts.bycopy_experts, experts.fallback_experts):
-        implementation.workspace_shapes.return_value = ((1,), (1,), (1,))
-
+    implementations = (
+        experts.bycopy_experts.experts,
+        experts.bycopy_experts.fallback_experts,
+        experts.fallback_experts,
+    )
+    implementations[0].workspace_shapes.return_value = ((1,), (1,), (1,))
+    implementations[1].workspace_shapes.return_value = ((400,), (1,), (1,))
+    implementations[2].workspace_shapes.return_value = ((1,), (300,), (1,))
     w13_codes = torch.ones((2, 2, 1), dtype=torch.uint8)
     w2_codes = torch.ones((2, 1, 1), dtype=torch.uint8)
     layer = SimpleNamespace(
@@ -101,17 +137,20 @@ def test_composite_binds_tile_divisor_codes(monkeypatch):
         w13_fp8_scale_divisor_code=w13_codes,
         w2_fp8_scale_divisor_code=w2_codes,
     )
+    reserve = MagicMock()
     monkeypatch.setattr(
         nvfp4_bycopy_moe, "marlin_moe_intermediate_size", lambda *args: 128
     )
-    monkeypatch.setattr(
-        nvfp4_bycopy_moe, "reserve_workspace_for_all_ubatches", MagicMock()
-    )
+    monkeypatch.setattr(nvfp4_bycopy_moe, "reserve_workspace_for_all_ubatches", reserve)
 
     experts.process_weights_after_loading(layer)
 
-    assert experts.bycopy_experts.w13_fp8_scale_divisor_code is w13_codes
-    assert experts.bycopy_experts.w2_fp8_scale_divisor_code is w2_codes
+    for implementation in implementations[:2]:
+        assert implementation.w13_fp8_scale_divisor_code is w13_codes
+        assert implementation.w2_fp8_scale_divisor_code is w2_codes
+    for implementation in implementations:
+        implementation.workspace_shapes.assert_called_once()
+    reserve.assert_called_once_with(1280)
 
 
 def test_support_is_exact_tp1_and_fail_closed(monkeypatch):

@@ -150,6 +150,7 @@ if(DEEPGEMM_ARCHS)
               "${deepgemm_SOURCE_DIR}" "${_dg_dir}" "${_pybin}"
       COMMAND "${CMAKE_COMMAND}" -E touch "${_dg_marker}"
       DEPENDS "${CMAKE_SOURCE_DIR}/tools/build_deepgemm_C.py"
+              "${CMAKE_SOURCE_DIR}/csrc/deepgemm_torch_bindings.cpp"
               "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp"
               ${_dg_headers}
       COMMENT "Building DeepGEMM _C for ${_pybin}"

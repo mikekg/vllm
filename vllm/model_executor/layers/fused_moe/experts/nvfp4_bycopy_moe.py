@@ -3,6 +3,7 @@
 """Runtime NVFP4-to-FP8 materialization for Triton MoE experts."""
 
 from math import prod
+from typing import cast
 
 import torch
 
@@ -13,6 +14,14 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+    compute_aligned_M_and_alignment,
+    deepgemm_moe_permute,
+    deepgemm_unpermute_and_reduce,
+)
+from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+    _valid_deep_gemm_shape,
 )
 from vllm.model_executor.layers.fused_moe.experts.fallback import FallbackExperts
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
@@ -26,12 +35,13 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+    silu_mul_per_token_group_quant_fp8_colmajor,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_moe_intermediate_size,
     marlin_pad_dim,
-)
-from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    _lookup_nvfp4_bycopy_m_knee,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -39,6 +49,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
+from vllm.utils.deep_gemm import (
+    get_mk_alignment_for_contiguous_layout,
+    is_deep_gemm_supported,
+    m_grouped_fp8_gemm_nt_contiguous,
+    mk_alignment_scope,
+)
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.workspace import reserve_workspace_for_all_ubatches
 
@@ -60,8 +76,21 @@ def _lookup_moe_m_knee(
     device_name: str,
     dtype: torch.dtype,
     shape: MoeShape,
-) -> int:
-    return _lookup_nvfp4_bycopy_m_knee(device_name, dtype, shape)
+) -> int | None:
+    del device_name, dtype, shape
+    return None
+
+
+def _deepgemm_shape_supported(
+    m: int, n: int, k: int, activation: MoEActivation
+) -> bool:
+    return (
+        activation == MoEActivation.SILU
+        and is_deep_gemm_supported()
+        and n > 512
+        and _valid_deep_gemm_shape(m, 2 * n, k)
+        and _valid_deep_gemm_shape(m, k, n)
+    )
 
 
 def _marlin_problem_size(
@@ -363,6 +392,172 @@ class NvFp4ToFp8TritonExperts(TritonExperts):
         self.moe_sum(intermediate3, output)
 
 
+class NvFp4ToFp8DeepGemmExperts(NvFp4ToFp8TritonExperts):
+    """Stage NVFP4 weights through grouped DeepGEMM with one weight arena."""
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        del global_num_experts
+        block_m = get_mk_alignment_for_contiguous_layout()[0]
+        m_sum, _ = compute_aligned_M_and_alignment(
+            M, topk, local_num_experts, block_m, expert_tokens_meta
+        )
+        prefix = round_up(m_sum * max(N, K), 256)
+        _, weight, scale, _ = self._workspace_layout(
+            M, N, K, topk, local_num_experts, activation
+        )
+        itemsize = self.moe_config.in_dtype.itemsize
+        return (
+            ((prefix + weight + scale + itemsize - 1) // itemsize,),
+            (m_sum, max(2 * N, K)),
+            (M, K),
+        )
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        del a1q_scale, a2_scale, global_num_experts
+        assert activation == MoEActivation.SILU
+        assert self.w1_scale is not None and self.w2_scale is not None
+        assert self.g1_alphas is not None and self.g2_alphas is not None
+        assert self.w13_fp8_scale_divisor_code is not None
+        assert self.w2_fp8_scale_divisor_code is not None
+
+        e, m, n, k, topk = self.moe_problem_size(hidden_states, w1, w2, topk_ids)
+        block_m, block_k = get_mk_alignment_for_contiguous_layout()
+        m_sum, _ = compute_aligned_M_and_alignment(
+            m, topk, e, block_m, expert_tokens_meta
+        )
+        prefix = round_up(m_sum * max(n, k), 256)
+        _, weight_bytes, scale_bytes, w13_n = self._workspace_layout(
+            m, n, k, topk, e, activation
+        )
+        arena = workspace13.view(torch.uint8)
+        weights = arena.narrow(0, prefix, weight_bytes).view(torch.float8_e4m3fn)
+        scales = arena.narrow(0, prefix + weight_bytes, scale_bytes).view(torch.float32)
+        w13_fp8 = weights[: e * w13_n * k].view(e, w13_n, k)
+        w2_fp8 = weights[: e * k * n].view(e, k, n)
+        w13_scale = scales[: e * (w13_n // block_k) * (k // block_k)].view(
+            e, w13_n // block_k, k // block_k
+        )
+        w2_scale = scales[: e * (k // block_k) * (n // block_k)].view(
+            e, k // block_k, n // block_k
+        )
+
+        ops.marlin_nvfp4_to_fp8(
+            w13_fp8,
+            w13_scale,
+            w1,
+            self.w1_scale,
+            self.g1_alphas,
+            self.w13_fp8_scale_divisor_code,
+            self.moe_config.in_dtype,
+        )
+        a1q, a1q_scale = per_token_group_quant_fp8(hidden_states, block_k)
+        a1q_out = arena[: m_sum * k].view(torch.float8_e4m3fn).view(m_sum, k)
+        a1q, a1q_scale, expert_ids, inv_perm, align_used = deepgemm_moe_permute(
+            aq=a1q,
+            aq_scale=a1q_scale,
+            topk_ids=topk_ids,
+            local_num_experts=e,
+            expert_map=expert_map,
+            expert_tokens_meta=expert_tokens_meta,
+            aq_out=a1q_out,
+        )
+        with mk_alignment_scope(align_used):
+            mm1 = _resize_cache(workspace2, (m_sum, w13_n))
+            m_grouped_fp8_gemm_nt_contiguous(
+                (a1q, a1q_scale), (w13_fp8, w13_scale), mm1, expert_ids
+            )
+            ops.marlin_nvfp4_to_fp8(
+                w2_fp8,
+                w2_scale,
+                w2,
+                self.w2_scale,
+                self.g2_alphas,
+                self.w2_fp8_scale_divisor_code,
+                self.moe_config.in_dtype,
+            )
+            a2q_out = arena[: m_sum * n].view(torch.float8_e4m3fn).view(m_sum, n)
+            a2q, a2q_scale = silu_mul_per_token_group_quant_fp8_colmajor(
+                input=mm1,
+                output=a2q_out,
+                use_ue8m0=False,
+                group_size=block_k,
+            )
+            mm2 = _resize_cache(workspace2, (m_sum, k))
+            m_grouped_fp8_gemm_nt_contiguous(
+                (a2q, a2q_scale), (w2_fp8, w2_scale), mm2, expert_ids
+            )
+
+        if apply_router_weight_on_input:
+            topk_weights = torch.ones_like(topk_weights)
+        deepgemm_unpermute_and_reduce(
+            a=mm2,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            inv_perm=inv_perm,
+            expert_map=expert_map,
+            output=output,
+        )
+
+
+class NvFp4ToFp8Experts(FallbackExperts):
+    """Use DeepGEMM where its grouped shape contract is satisfied."""
+
+    def __init__(
+        self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig
+    ) -> None:
+        super().__init__(
+            NvFp4ToFp8DeepGemmExperts(moe_config, quant_config),
+            NvFp4ToFp8TritonExperts(moe_config, quant_config),
+        )
+
+    @staticmethod
+    def get_clses() -> tuple[
+        type[mk.FusedMoEExpertsModular], type[mk.FusedMoEExpertsModular]
+    ]:
+        return NvFp4ToFp8DeepGemmExperts, NvFp4ToFp8TritonExperts
+
+    def _use_deepgemm(self, m: int, n: int, k: int) -> bool:
+        return _deepgemm_shape_supported(m, n, k, self.moe_config.activation)
+
+    def workspace_shapes(self, M: int, N: int, K: int, *args, **kwargs):
+        experts = self.experts if self._use_deepgemm(M, N, K) else self.fallback_experts
+        return experts.workspace_shapes(M, N, K, *args, **kwargs)
+
+    def _select_experts_impl(self, hidden_states, w1, w2):
+        del w1, w2
+        m = hidden_states.shape[0]
+        n = self.moe_config.intermediate_size_per_partition
+        k = self.moe_config.hidden_dim
+        return self.experts if self._use_deepgemm(m, n, k) else self.fallback_experts
+
+
 class NvFp4ByCopyExperts(FallbackExperts):
     """Select Marlin or staged FP8 experts from post-dispatch M."""
 
@@ -371,7 +566,7 @@ class NvFp4ByCopyExperts(FallbackExperts):
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ) -> None:
-        experts = NvFp4ToFp8TritonExperts(moe_config, quant_config)
+        experts = NvFp4ToFp8Experts(moe_config, quant_config)
         fallback = MarlinExperts(moe_config, quant_config)
         super().__init__(experts=experts, fallback_experts=fallback)
         self.bycopy_experts = experts
@@ -386,7 +581,7 @@ class NvFp4ByCopyExperts(FallbackExperts):
         type[mk.FusedMoEExpertsModular],
         type[mk.FusedMoEExpertsModular],
     ]:
-        return NvFp4ToFp8TritonExperts, MarlinExperts
+        return NvFp4ToFp8Experts, MarlinExperts
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -498,10 +693,15 @@ class NvFp4ByCopyExperts(FallbackExperts):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.m_knee is None:
             return
-        self.bycopy_experts.w13_fp8_scale_divisor_code = (
-            layer.w13_fp8_scale_divisor_code
-        )
-        self.bycopy_experts.w2_fp8_scale_divisor_code = layer.w2_fp8_scale_divisor_code
+        for experts in (
+            cast(NvFp4ToFp8TritonExperts, self.bycopy_experts.experts),
+            cast(
+                NvFp4ToFp8TritonExperts,
+                self.bycopy_experts.fallback_experts,
+            ),
+        ):
+            experts.w13_fp8_scale_divisor_code = layer.w13_fp8_scale_divisor_code
+            experts.w2_fp8_scale_divisor_code = layer.w2_fp8_scale_divisor_code
 
         m = self.moe_config.max_num_tokens
         n = marlin_moe_intermediate_size(layer.w13_weight, layer.w2_weight)
@@ -530,7 +730,8 @@ class NvFp4ByCopyExperts(FallbackExperts):
 
         reserve_workspace_for_all_ubatches(
             max(
-                required_bytes(self.bycopy_experts),
+                required_bytes(self.bycopy_experts.experts),
+                required_bytes(self.bycopy_experts.fallback_experts),
                 required_bytes(self.fallback_experts),
             )
         )

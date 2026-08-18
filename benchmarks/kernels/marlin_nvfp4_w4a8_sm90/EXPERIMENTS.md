@@ -2881,3 +2881,46 @@ downstream meaning of its output. Encoding router-consumer policy in that
 module would cross the ownership boundary. Keep this only as a benchmark
 control; any production exclusion must be an explicit decision at the model
 or MoE composition layer that owns routing semantics.
+
+## 56. Q3 paired GSM8K and selector-cutoff reruns
+
+Job 6645286 repeated the Q3 A/B/C GSM8K series with persistent per-question
+details. It used model revision
+`d3273f65a140017763d977132f187cbb75984587`, 1,319 five-shot questions,
+deterministic decoding, and diagnostic MoE `M_knee=6,144`. The variants were
+the same A/B/C backend decomposition as section 55.
+
+| Variant | Correct | Accuracy | Eval s | Questions/s | Output tok/s |
+|---|---:|---:|---:|---:|---:|
+| A | 1,172 | 88.8552% | 45.981808 | 28.685258 | 4,232.608709 |
+| B | 1,171 | 88.7794% | 46.543811 | 28.338891 | 4,189.472122 |
+| C | 1,157 | 87.7180% | 47.319359 | 27.874427 | 4,144.730722 |
+
+Against A, B had 16 correct-to-wrong and 15 wrong-to-correct flips, giving an
+exact two-sided McNemar p-value of 1.0. C had 30 regressions and 15
+improvements, p=0.0356978. B therefore matched A in this paired sample; C was
+lower. This separates the MoE-only result from the combined dense-plus-MoE
+result more clearly than job 6644899's aggregate counts.
+
+Job 6645558 then completed B/C at `M_knee=4,608` and `4,096`. The four Slurm
+steps were serialized, and the script retained the five-minute service teardown
+interval between cutoff groups. It completed successfully in 25:52. The A
+details from job 6645286 have the same model revision, question indices, and
+labels and were used for the paired comparisons.
+
+| Knee | Variant | Correct | Accuracy | Eval s | Regressions / improvements vs A | McNemar p |
+|---:|---|---:|---:|---:|---:|---:|
+| 4,608 | B | 1,157 | 87.7180% | 46.554372 | 27 / 12 | 0.0237027 |
+| 4,608 | C | 1,164 | 88.2487% | 46.596236 | 23 / 15 | 0.2558751 |
+| 4,096 | B | 1,174 | 89.0068% | 46.232126 | 11 / 13 | 0.8388197 |
+| 4,096 | C | 1,165 | 88.3245% | 46.982392 | 26 / 19 | 0.3712980 |
+
+Output-token counts differed across variants, so these evaluator runtimes are
+not matched-token serving throughput measurements. The paired outcomes also
+vary across the serial repeats: B is neutral at 6,144, lower at 4,608, and
+neutral at 4,096. These runs therefore record observed quality at each cutoff
+without isolating cutoff effects from run-to-run generation variability.
+
+Artifacts are under `.benchmark/gsm8k-q3-moe-abc-6645286/` and
+`.benchmark/gsm8k-q3-moe-cutoffs-6645558/` in the campaign workspace. Each
+variant has both a summary JSON and a per-question details JSONL.

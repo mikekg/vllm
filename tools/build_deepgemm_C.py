@@ -24,6 +24,7 @@ if len(sys.argv) != 4:
 src = Path(sys.argv[1]).resolve()
 out = Path(sys.argv[2]).resolve()
 target_py = sys.argv[3]
+vllm_root = Path(__file__).resolve().parent.parent
 out.mkdir(parents=True, exist_ok=True)
 
 info = json.loads(
@@ -67,7 +68,7 @@ cmd = [
     "-DTORCH_EXTENSION_NAME=_C",
     f"-D_GLIBCXX_USE_CXX11_ABI={int(torch.compiled_with_cxx11_abi())}",
     *(f"-I{p}" for p in includes),
-    str(src / "csrc/python_api.cpp"),
+    str(vllm_root / "csrc/deepgemm_torch_bindings.cpp"),
     *(f"-L{p}" for p in cpp_extension.library_paths(device_type="cuda")),
     f"-L{cuda_home}/lib64",
     "-ltorch",

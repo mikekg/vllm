@@ -78,6 +78,15 @@ bool moe_permute_unpermute_supported();
 int64_t moe_permute_sort_workspace_size(int64_t num_expanded_rows,
                                         int64_t num_expert);
 
+void deepgemm_moe_permute(
+    const torch::stable::Tensor& input,
+    const torch::stable::Tensor& input_scale,
+    const torch::stable::Tensor& topk_ids,
+    const std::optional<torch::stable::Tensor>& expert_map, int64_t align_m,
+    torch::stable::Tensor& permuted_input,
+    torch::stable::Tensor& permuted_scale, torch::stable::Tensor& expert_ids,
+    torch::stable::Tensor& inv_perm, torch::stable::Tensor& expert_offsets);
+
 void shuffle_rows(const torch::stable::Tensor& input_tensor,
                   const torch::stable::Tensor& dst2src_map,
                   torch::stable::Tensor& output_tensor);

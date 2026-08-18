@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_nvfp4_moe_layer_for_marlin,
 )
+from vllm.utils.deep_gemm import calc_diff
 from vllm.v1.worker.workspace import init_workspace_manager
 
 SHAPES = {
@@ -278,6 +279,7 @@ def run_shape(
                             "cutlass_us": cutlass_us,
                             "speedup": marlin_us / cutlass_us,
                             "max_abs": error.max().item(),
+                            "calc_diff": calc_diff(reference, candidate).item(),
                             "relative_l2": (
                                 torch.linalg.vector_norm(error) / ref_norm
                             ).item(),

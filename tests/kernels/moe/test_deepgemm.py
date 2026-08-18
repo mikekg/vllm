@@ -50,7 +50,7 @@ BLOCK_SIZE = [128, 128]
     ),
     reason="Requires the CUDA DeepGEMM MoE layout adapter.",
 )
-def test_native_deepgemm_moe_permute_layout():
+def test_native_deepgemm_moe_permute_ep_layout_and_unpermute():
     activations = (
         (torch.arange(3 * 128, device="cuda", dtype=torch.int16) % 16)
         .to(torch.float8_e4m3fn)
@@ -58,18 +58,19 @@ def test_native_deepgemm_moe_permute_layout():
     )
     scales = torch.arange(1, 4, device="cuda", dtype=torch.float32).reshape(3, 1)
     topk_ids = torch.tensor([[0, 2], [1, 0], [2, 1]], device="cuda")
+    expert_map = torch.tensor([0, -1, 1], device="cuda", dtype=torch.int32)
     rows = 512
     permuted = torch.empty((rows, 128), device="cuda", dtype=activations.dtype)
     permuted_scales = torch.empty((rows, 1), device="cuda", dtype=torch.float32)
     expert_ids = torch.empty(rows, device="cuda", dtype=torch.int32)
     inv_perm = torch.empty_like(topk_ids, dtype=torch.int32)
-    expert_offsets = torch.empty(3, device="cuda", dtype=torch.int32)
+    expert_offsets = torch.empty(2, device="cuda", dtype=torch.int32)
 
     torch.ops._moe_C.deepgemm_moe_permute(
         activations,
         scales,
         topk_ids,
-        None,
+        expert_map,
         128,
         permuted,
         permuted_scales,
@@ -81,13 +82,31 @@ def test_native_deepgemm_moe_permute_layout():
     for token, expert in enumerate(topk_ids.cpu().tolist()):
         for choice, expert_id in enumerate(expert):
             destination = inv_perm[token, choice]
+            local_expert = expert_map[expert_id].item()
+            if local_expert < 0:
+                assert destination.item() == -1
+                continue
             torch.testing.assert_close(permuted[destination], activations[token])
             torch.testing.assert_close(permuted_scales[destination], scales[token])
-            assert expert_ids[destination].item() == expert_id
-    for expert_id in range(3):
+            assert expert_ids[destination].item() == local_expert
+    for expert_id in range(2):
         assert (expert_ids == expert_id).nonzero()[0].item() % 128 == 0
     padding = expert_ids < 0
     assert torch.count_nonzero(permuted_scales[padding]) == 0
+
+    topk_weights = torch.ones_like(topk_ids, dtype=torch.float32)
+    unpermuted = torch.empty_like(activations)
+    torch.ops._moe_C.moe_unpermute(
+        permuted,
+        topk_weights,
+        inv_perm,
+        None,
+        topk_ids.size(1),
+        unpermuted,
+    )
+    local_routes = (expert_map[topk_ids] >= 0).sum(1, keepdim=True)
+    expected = (activations.float() * local_routes).to(activations.dtype)
+    torch.testing.assert_close(unpermuted.float(), expected.float(), atol=0, rtol=0)
 
 
 @pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")

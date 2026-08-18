@@ -129,7 +129,8 @@ __global__ void finalizeMoeRoutingKernel(
       int64_t const k_offset = original_row * k + k_idx;
       float const row_scale = scales[k_offset];
 
-      if (CHECK_SKIPPED && expanded_permuted_row >= num_valid) {
+      if (expanded_permuted_row < 0 ||
+          (CHECK_SKIPPED && expanded_permuted_row >= num_valid)) {
         continue;
       }
 

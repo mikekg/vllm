@@ -111,6 +111,42 @@ The approximately fixed conversion term explains why large prefill is the
 favorable end of the range. Tile changes make both curves piecewise, so this
 equation explains the direction rather than supplying a universal knee.
 
+### Measured transient full-path fit
+
+Before the current native boundary, jobs 6627480/6627481 and 6627494/6627495
+measured 60 M values over 16 `(N,K)` shapes for each of fixed and rotating
+targets. With `m=M/1024`, `n=N/1024`, `k=K/1024`, and
+`delta=T_8-T_4` in microseconds, the pooled fit was
+
+\[
+\widehat\Delta=27.0321415293-1.11012762491nk+5.12906422841n
++0.252633354334k+m(0.835812553727k-2.75518223775n
+-3.87707405808nk).
+\]
+
+Writing the constant and M coefficients as A(n,k) and B(n,k),
+
+\[
+\widehat\Delta=A(n,k)+(M/1024)B(n,k).
+\]
+
+The strict integer threshold for margin q and B<0 is
+
+\[
+M_{min}=\left\lfloor\frac{-1024(A+q)}{B}\right\rfloor+1.
+\]
+
+Shape-LOSO validation gave R2=0.9714992641, 6.170117 us median absolute error,
+93.3854% sign accuracy, and TP/FP/TN/FN=629/59/1164/68 without a margin. The
+empirical zero-false-selection margin was 13.673077 us, rounded upward to
+q=14 us. It produced knees 23,064 for 512x512, 8,004 for 1024x1024, 659 for
+4096x4096, and 3,317 for 4096x512; 128x4096 had no FP8 region.
+
+That fit predates the native internal-allocation boundary and is not the
+current dispatch rule. The current implementation uses m_knee=1, raised to
+max_cudagraph_capture_size+1 when compilation configuration is present; the
+constant-512 `_lookup_nvfp4_bycopy_m_knee` helper is not called by this class.
+
 ### Historical cached-weight fit
 
 An earlier experiment converted dense weights once during loading and retained
@@ -166,12 +202,56 @@ For an admitted layer, the resident and transient layouts are:
 The weight and scale tensors are transposed as zero-copy views for the
 CUTLASS operand layout. The output is narrowed back to M rows.
 
-The divisor code stores the selected S0E5M3 tile divisor. Conversion decodes
-that divisor, applies its reciprocal to the packed E2M1 value multiplied by
-the processed E4M3 scale, and emits an E4M3 value. The FP32 tile scale carries
-the matching divisor, per-layer global scale, and the BF16 or FP16 exponent
-compensation. Their product reconstructs the same resident quantized weight
-represented by the packed code and original scale hierarchy.
+### Exact tile-divisor construction
+
+The divisor metadata is derived before Marlin repacking, while the checkpoint
+weight is still packed as two E2M1 values per byte. For every 16-value scale
+group, preprocessing strips the sign bit from both nibbles, takes the larger
+magnitude code, maps codes 0--7 to
+
+\[
+(0,\tfrac12,1,\tfrac32,2,3,4,6),
+\]
+
+and multiplies that magnitude by the absolute checkpoint block scale. It pads
+N to 128 rows and K/16 to eight scale groups, then takes the maximum over each
+128-by-128 tile:
+
+\[
+a_{tile}=\max_{(n,k)\in tile}|q_{nk}|\,|s_{group(n,k)}|.
+\]
+
+With the Marlin scale normalization factor `scale_factor`, preprocessing forms
+
+\[
+u=2\,scale\_factor\,a_{tile}.
+\]
+
+It first rounds `u/7` to FP16, retains the FP16 exponent and top three
+mantissa bits (`half_bits >> 7`), increments the code when its decoded value
+times seven is still below `u`, then rounds the S0E5M3 mantissa upward to four
+with an exponent carry when needed. An all-zero tile receives code `0x78`,
+which decodes to FP16 1.0. One uint8 code is stored per 128-by-128 tile.
+
+The CUDA converter decodes a processed scale byte and divisor code by shifting
+each left seven bits into an FP16 bit pattern. It multiplies each unpacked
+E2M1 pair by
+
+\[
+s_{normalized}=\min(s_{processed}/d_{tile},65504)
+\]
+
+and saturating-rounds the result to E4M3. The emitted FP32 tile scale is
+
+\[
+s_{tile}=s_{global,processed}\,d_{tile}\,
+\begin{cases}2^{-14},&\text{FP16 resident},\\2^{-126},&\text{BF16 resident}.
+\end{cases}
+\]
+
+The E4M3 byte times this FP32 scale is the converted representation consumed
+by CUTLASS. The divisor changes where rounding occurs; it does not add a
+second resident weight.
 
 Runtime enters one functional native operator,
 _C::marlin_nvfp4_hybrid_linear, implemented in
@@ -188,6 +268,39 @@ GEMM. For M at or above the knee it:
 6. converts packed NVFP4 and its exact scale representation;
 7. calls the existing block-scaled FP8 CUTLASS GEMM;
 8. narrows output to logical M.
+
+### Native ABI and exact branch sequence
+
+Python flattens every leading activation dimension into `x_2d=[M,K]` and
+passes nine values to `_C::marlin_nvfp4_hybrid_linear`: input, packed int32
+weight, processed E4M3 scales, processed FP32 global scale, uint8 divisor
+codes, Marlin int32 workspace, `m_knee`, `use_atomic_add`, and
+`use_fp32_reduce`. The native entry checks rank, dtype, physical dimensions,
+positive knee, and that every resident tensor is on the input CUDA device.
+
+For `M<m_knee`, it immediately calls the existing E2M1 Marlin GEMM with
+`is_k_full=true` and the two stored reduction flags. No activation, converted
+weight, FP8 scale, or output scratch has been allocated at that point.
+
+For `M>=m_knee`, the sequence is:
+
+1. obtain a contiguous `[M,K]` input, aliasing the original when already
+   contiguous;
+2. compute `M4=4*ceil(M/4)`;
+3. allocate output `[M4,N]` in the input dtype, activation `[M4,K]` in E4M3,
+   activation-scale backing `[K/128,M4]` in FP32, converted weight `[N,K]` in
+   E4M3, and weight scales `[N/128,K/128]` in FP32;
+4. transpose the activation-scale backing to the column-major `[M4,K/128]`
+   view, then quantize the logical first M rows in groups of 128 with epsilon
+   `1e-10`, saturation range `[-448,448]`, and column-major scales;
+5. convert the complete packed weight and tile scales;
+6. pass activation, `weight.T`, activation scales, and `weight_scale.T` to the
+   existing block-scaled CUTLASS GEMM;
+7. return `output[:M]`, after which Python restores the original leading
+   activation dimensions.
+
+The extra padded activation rows need not contribute observable values because
+GEMM rows are independent and the returned tensor excludes them.
 
 Current admitted N and K are positive multiples of 128. Bias and unsupported
 layouts use Marlin.
@@ -217,12 +330,31 @@ swapped 128-by-16 kernel. Padding keeps the problem on the non-swapped kernel.
 The hybrid admits only K and N divisible by 128; it does not infer broader K/N
 performance behavior from the absence of an analogous dispatch expression.
 
-The converter itself uses several native implementations. On SM90, a
-single-expert problem with at most 64 128-by-128 tiles uses the sparse64
-kernel. Larger dense single-expert shapes use the tiled or double-buffered
-path according to their K-block layout. Rank-3 expert tensors use the
-multi-expert tiled path, while the generic kernel remains the fallback for
-other supported layouts.
+The converter has several native implementations. For the current SM90 dense
+path, `tile_count=(N/128)*(K/128)`: at most 64 tiles dispatches
+`marlin_nvfp4_to_fp8_sparse64_kernel`; 65 tiles and above dispatches
+`marlin_nvfp4_to_fp8_tiled_kernel<false, true>`, the synchronous paired
+producer. The double-buffered branch is used only by the non-SM90
+single-expert path when the K-block count is even, so the SM90-only dense
+hybrid does not enter it. Rank-3 expert tensors use the multi-expert tiled
+path, and other supported layouts use the generic fallback. The focused SM90
+boundary test covers 64 and 65 tiles in both FP16 and BF16; built-operator job
+6627092 passed the same boundary against an independent oracle and output
+canaries.
+
+With `x=NK/2^20`, jobs 6627093 and 6627094 measured the built selector with a
+distinct cold source on every timed launch:
+
+\[
+T_{fixed}=9.17897921+0.66824616\max(0,x-14.88865048),
+\]
+\[
+T_{rot}=11.11049993+0.73446567\max(0,x-13.95401231).
+\]
+
+Fixed-target train/holdout R2 was 0.999636627/0.993343840; rotating-target
+R2 was 0.998633357/0.993419824. These are converter-only surfaces, not the
+complete dense branch knee.
 
 ## Torch compile and CUDA graphs
 
@@ -290,6 +422,33 @@ bytes of output, with by=2 for BF16/FP16.
 All are transient. Persistent state is ordinary packed NVFP4 Marlin state
 plus one uint8 divisor code per 128-by-128 tile. In the current
 implementation, the low-M branch returns before creating high-path scratch.
+
+Combining the terms, the allocated high-branch payload is
+
+\[
+B_{high}=M_4K+4M_4K/128+NK+4NK/128^2+2M_4N
+\]
+
+or
+
+\[
+B_{high}=\frac{33}{32}M_4K+\frac{4097}{4096}NK+2M_4N
+\]
+
+bytes for FP16/BF16 output. A noncontiguous input can additionally allocate a
+logical contiguous copy of `2MK` bytes. Allocator rounding is outside these
+payload equations.
+
+The only converter-specific persistent tensor is the divisor grid:
+
+\[
+B_{divisor}=(N/128)(K/128)=NK/16384\ \text{bytes}.
+\]
+
+The packed FP4 weight occupies `NK/2` bytes, so divisor metadata is `1/8192`
+(0.01220703125%) of packed-weight storage. Processed block scales, processed
+global scale, packed weight, and Marlin workspace are the ordinary Marlin
+resident representation.
 
 ## Measured development chronology
 
@@ -477,56 +636,71 @@ of 192.75 at length 9728.
 | B | 6645230 | 41.311501 s | 3172.772618 tok/s | +9.468% |
 | C | 6645235 | 40.971829 s | 3199.076095 tok/s | +10.376% |
 
+A later Q36 formula-ladder run used `M_knee=8,193` and measured the complete
+concurrency sequence `[1,2,4,8,16,32,64,128,256,512]`. Job 6646399 was B
+(Marlin dense plus hybrid MoE); job 6646400 was C (hybrid dense plus hybrid
+MoE). Their exact output-token/s values and incremental dense effect were:
+
+| Concurrency | B tok/s | C tok/s | C/B - 1 |
+|---:|---:|---:|---:|
+| 1 | 221.1562262 | 220.6201431 | -0.242400% |
+| 2 | 432.2056645 | 404.1341633 | -6.494941% |
+| 4 | 754.0502025 | 702.6082464 | -6.822086% |
+| 8 | 1,145.9857638 | 1,101.3417264 | -3.895689% |
+| 16 | 1,624.4314987 | 1,582.8796484 | -2.557932% |
+| 32 | 2,175.5886607 | 2,158.6717285 | -0.777580% |
+| 64 | 2,692.8749164 | 2,704.2783047 | +0.423465% |
+| 128 | 3,182.4137426 | 3,222.0570617 | +1.245700% |
+| 256 | 3,024.7278640 | 3,050.9239561 | +0.866064% |
+| 512 | 3,155.5385613 | 3,199.3768603 | +1.389249% |
+
+All 20 B/C points completed without a nonempty benchmark error. This is a
+complete-model C-minus-B observation, not an isolated dense-GEMM surface.
+
 The incremental C-over-B change was +0.829%. These complete-model increments
 are not isolated GEMM timings: the dense selector also sees projections whose
 semantic role is not encoded in the local weight object.
 
-## Paired accuracy and the router projection
+## Paired accuracy and router handling
 
-Paired job 6645286 evaluated 1,319 Q3 GSM8K examples. It used the same A/B/C
-backend split as the throughput run and the diagnostic MoE m_knee=6144:
+Job 6645286 preceded router protection. Its A/B/C counts were 1,172, 1,171,
+and 1,157; A-versus-C had 30 regressions, 15 improvements, and exact McNemar
+p=0.0356978. That result identified the router as the missing semantic case,
+not an N/K/M calibration failure.
 
-| Variant | Correct | Accuracy | Change from A |
-|---|---:|---:|---:|
-| A | 1172 | 88.8552% | -- |
-| B | 1171 | 88.7794% | -1 answer / -0.0758 pp |
-| C | 1157 | 87.7180% | -15 answers / -1.1372 pp |
+Q3's router is an ordinary quantized `ReplicatedLinear`. Its local input,
+weight type, and output shape do not show that its output feeds top-k, so the
+dense kernel cannot identify it from layer-local properties.
 
-A versus B had 16 regressions and 15 improvements, with McNemar p=1. A versus
-C had 30 regressions and 15 improvements, with p=0.0356978. The MoE-only
-variant was indistinguishable from A in this sample; the combined dense+MoE
-variant was not.
+### Current post-load object-identity scan
 
-Q3's router is an ordinary quantized ReplicatedLinear. From inside the dense
-linear, its local input, weight type, and output shape do not reveal that its
-output becomes router logits. A perturbation before top-k can change discrete
-expert membership, so router identification is a topology question rather
-than another N/K/M rule.
+`MoERunner.gate` holds the exact linear module whose output becomes router
+logits. After per-layer quantization finalization, deferred-attention and HPC
+processing, and the optional model-level post-load hook,
+`process_weights_after_loading()` walks `model.modules()`. For every
+`MoERunner` with a gate it sets `_vllm_is_moe_router=True` on that exact gate.
+This occurs before first compilation and changes no prepared weight layout.
 
-## Router-identification options
+`MarlinNvFp4ToFp8LinearKernel.apply_weights()` checks the static marker before
+calling the native hybrid and delegates marked layers to its embedded W4A16
+Marlin kernel. The focused test confirms that the exact gate is marked while
+the shared-expert gate and an unrelated linear are not.
 
-### Post-load object-identity scan
+Jobs 6646885, 6646889, and 6646896 repeated the 1,319-question deterministic
+Q3 comparison with this guard and `M_knee=4,097`:
 
-MoERunner stores the actual gate module as runner.gate. A whole-model walk can
-therefore collect the exact objects:
+| Variant | Job | Correct | Accuracy | Eval s | Output tok/s | `n01` | `n10` | Delta | Exact McNemar p |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A: Marlin dense + Marlin MoE | 6646885 | 1,157 | 87.717968% | 46.2953 | 4,225.395 | -- | -- | -- | -- |
+| B: Marlin dense + hybrid MoE | 6646889 | 1,162 | 88.097043% | 47.6191 | 4,100.368 | 17 | 12 | +0.379075 pp | 0.4582583 |
+| C: hybrid dense + hybrid MoE | 6646896 | 1,159 | 87.869598% | 49.4624 | 3,956.847 | 20 | 18 | +0.151630 pp | 0.8714147 |
 
-    router_gates = {
-        id(runner.gate): runner.gate
-        for runner in model.modules()
-        if isinstance(runner, MoERunner) and runner.gate is not None
-    }
+Here `n01` is A-wrong/candidate-right and `n10` is
+A-right/candidate-wrong. Neither hybrid variant had a statistically
+significant paired accuracy change. Artifacts are under
+`.benchmark/gsm8k-q3-current-formula-current-formula-20260818-r1/`.
 
-The objects can receive a static routed_gate attribute, or their dense knee
-can be set to the Marlin-only state. The model-level
-process_weights_after_loading hook runs after per-layer weight processing but
-before first Dynamo compilation. That is late enough to retain the prepared
-Marlin layout and early enough for Dynamo to specialize the static
-attribute.
-
-The integration limitation is discoverability: vLLM does not currently expose
-one generic registration point for installing that model-tree processor over
-all built-in model loaders. This object-identity scan is an option described
-here; it is not implemented in the current path.
+## Router-identification alternatives
 
 ### Marking the object at the MoE construction boundary
 
@@ -599,8 +773,8 @@ The evidence separates four results:
 4. A functional native operation removes that surrounding work and produced
    the matched +48.422% Llama result.
 
-The remaining measured questions are the crossover over additional static
-(K,N) shapes, actual per-layer M distributions over the powers-of-two
-concurrency ladder, router treatment followed by paired accuracy, allocator
-activity after warmup, and ordinary tile-boundary steps in additional
-supported K/N shapes.
+The remaining measured questions are the native post-router throughput across
+additional static `(K,N)` shapes, actual per-layer M distributions over the
+powers-of-two concurrency ladder, a full-cost N/K refit for the current native
+allocation boundary, allocator activity after warmup, and ordinary
+tile-boundary steps in additional supported shapes.

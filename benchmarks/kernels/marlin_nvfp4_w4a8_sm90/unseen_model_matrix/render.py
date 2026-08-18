@@ -103,6 +103,7 @@ def common_env(
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         ),
         "PYTHONPATH": f"{overlay}/overlay",
+        "CUDA_HOME": f"{overlay}/cuda",
         "LD_LIBRARY_PATH": (
             "/usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib:"
             "/usr/local/lib/python3.12/dist-packages/torch/lib"

@@ -52,6 +52,20 @@ cuda_stubs = cuda_home / "lib64" / "stubs"
 assert cuda_cccl_include.is_dir(), cuda_cccl_include
 assert cuda_stubs.is_dir(), cuda_stubs
 
+cuda_shim = output / "cuda"
+cuda_shim_include = cuda_shim / "include"
+cuda_shim_include.mkdir(parents=True)
+for path in cuda_home.iterdir():
+    if path.name != "include":
+        (cuda_shim / path.name).symlink_to(path)
+for include_dir in (cuda_home / "include", cuda_cccl_include):
+    for path in include_dir.iterdir():
+        link = cuda_shim_include / path.name
+        if not link.exists():
+            link.symlink_to(path)
+assert (cuda_shim_include / "cuda/std/cstdint").is_file()
+assert (cuda_shim_include / "cuda_bf16.h").is_file()
+
 marlin = source / "csrc" / "libtorch_stable" / "quantization" / "marlin"
 scaled_mm = source / "csrc" / "libtorch_stable" / "quantization" / "w8a8" / "cutlass"
 subprocess.run(

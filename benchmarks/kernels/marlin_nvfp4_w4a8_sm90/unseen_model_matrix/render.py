@@ -353,11 +353,15 @@ def main() -> None:
     validate(data)
     if not args.overlay.startswith("/lustre/fs1/"):
         raise SystemExit("--overlay must be a validated /lustre/fs1 path")
-    image_pythons = {"/opt/venv/bin/python", "/usr/local/bin/python"}
+    image_pythons = {
+        "/opt/venv/bin/python",
+        "/usr/bin/python3",
+        "/usr/local/bin/python",
+    }
     if args.python not in image_pythons and not args.python.startswith("/lustre/fs1/"):
         raise SystemExit(
-            "--python must be /opt/venv/bin/python, /usr/local/bin/python, "
-            "or a validated /lustre/fs1 path"
+            "--python must be /opt/venv/bin/python, /usr/bin/python3, "
+            "/usr/local/bin/python, or a validated /lustre/fs1 path"
         )
     args.output.mkdir(parents=True, exist_ok=False)
     performance = args.output / "submit_performance.sh"

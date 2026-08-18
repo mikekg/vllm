@@ -8,7 +8,7 @@ runtime:
   root: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/w4a8-hopper-unified/w4a8-cuda-converter-only
   image: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/mmpareto/containers/vllm_v0.24.0.sqsh
   shared_scripts: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/mmpareto/scripts
-  gsm8k_data: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/composite-fix-eeaf7a59/gsm8k-data
+  gsm8k_data: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/w4a8-hopper-unified/w4a8-cuda-converter-only/data/gsm8k
   results: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/w4a8-hopper-unified/w4a8-cuda-converter-only/results/unseen-model-matrix
 
 selector:

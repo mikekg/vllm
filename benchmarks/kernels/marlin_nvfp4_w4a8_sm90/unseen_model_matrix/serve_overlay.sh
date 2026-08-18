@@ -36,6 +36,15 @@ mkdir -p "$RESULT_DIR" "$CACHE_ROOT"
 export VLLM_CACHE_ROOT="$CACHE_ROOT"
 export DG_JIT_CACHE_DIR="$CACHE_ROOT/deep_gemm"
 mkdir -p "$DG_JIT_CACHE_DIR"
+client_source=${GSM8K_CLIENT:-${IXBENCH:-}}
+: "${client_source:?benchmark client required}"
+if ((NODE_RANK == 0)); then
+  {
+    printf 'schema_version 1\nmodel %s\nmodel_revision %s\ndisabled_kernels %s\n' \
+      "$SERVED" "${MODEL_REVISION:-}" "${VLLM_DISABLED_KERNELS:-}"
+    sha256sum "$1" "$SCRIPTS/$RUN_SCRIPT" "$client_source"
+  } >"$RESULT_DIR/runtime.provenance"
+fi
 
 server=(
   "$PYTHON" -m vllm.entrypoints.cli.main serve "$MODEL_PATH"
@@ -66,7 +75,9 @@ if [[ -n ${EXTRA_SERVE:-} ]]; then
   server+=("${extra_serve[@]}")
 fi
 
-"${server[@]}" >"$LOG" 2>&1 &
+printf 'UNSEEN_MODEL_RUNTIME disabled_kernels=%s\n' \
+  "${VLLM_DISABLED_KERNELS:-}" >"$LOG"
+"${server[@]}" >>"$LOG" 2>&1 &
 server_pid=$!
 cleanup() {
   if ((NODES > 1 && NODE_RANK == 0)); then
@@ -149,6 +160,7 @@ for c in "${concurrencies[@]}"; do
     --ignore-eos
     --num-warmups "$((2 * c))"
     --percentile-metrics ttft,tpot,itl,e2el
+    --save-detailed
     --save-result
     --result-dir "$RESULT_DIR"
     --result-filename "bench_c${c}.json"
@@ -156,4 +168,6 @@ for c in "${concurrencies[@]}"; do
   [[ -n ${CHAT_TEMPLATE:-} ]] &&
     client+=(--chat-template "$CHAT_TEMPLATE")
   "${client[@]}" >"$RESULT_DIR/bench_c${c}.log" 2>&1
+  cp "$RESULT_DIR/runtime.provenance" "$RESULT_DIR/runtime_c${c}.provenance"
+  cp "$LOG" "$RESULT_DIR/server_c${c}.log"
 done

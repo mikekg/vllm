@@ -1,0 +1,151 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+schema_version: 1
+purpose: cached unseen-model validation for generic NVFP4 hybrid selectors
+
+runtime:
+  root: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/w4a8-hopper-unified/w4a8-cuda-converter-only
+  image: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/mmpareto/containers/vllm_v0.24.0.sqsh
+  shared_scripts: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/mmpareto/scripts
+  gsm8k_data: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/composite-fix-eeaf7a59/gsm8k-data
+  results: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/w4a8-hopper-unified/w4a8-cuda-converter-only/results/unseen-model-matrix
+
+selector:
+  moe_knee_formula: floor(256 * global_experts / top_k) + 1
+  dense_eligibility: W4A16_NVFP4 only; router gates always use Marlin
+  moe_eligibility: W4A16_NVFP4 only; native NVFP4 W4A4 is unchanged
+
+matrix:
+  variants: [native_reference, adaptive]
+  concurrencies: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+  output_tokens: 1024
+  random_range_ratio: 0.8
+  kv_cache_memory_bytes: 8589934592
+  workloads:
+    - {id: 1k1k, input_tokens: 1024, max_model_len: 2112}
+    - {id: 5k1k, input_tokens: 5120, max_model_len: 6208}
+    - {id: 8k1k, input_tokens: 8192, max_model_len: 9280}
+    - {id: 50k1k, input_tokens: 51200, max_model_len: 52288}
+  accuracy:
+    dataset: gsm8k
+    examples: 1319
+    save_per_example_outputs: true
+    compare: [native_reference, adaptive]
+
+models:
+  - id: nano30
+    model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/cutlass/e2m1/data/huggingface_models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+    repo: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+    revision: ce1b118ae66ec705d02c241525192832eb045fd3
+    topology:
+      engine_tp: 1
+      enable_expert_parallel: false
+      moe_tp: 1
+      moe_ep: 1
+      dp: 1
+      nodes: 1
+      gpus_per_node: 1
+    moe_shape: {global_experts: 128, top_k: 6, hidden_k: 2688, intermediate_n: 1856, layers: 52}
+    formula_knee: 5462
+    hybrid_action: native_only
+
+  - id: super120
+    model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/cutlass/e2m1/data/huggingface_models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+    repo: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+    revision: 4f0cf9daaeb7a4d5e23f80a00e7ed15f0e03caf6
+    topology:
+      engine_tp: 2
+      enable_expert_parallel: true
+      moe_tp: 1
+      moe_ep: 2
+      dp: 1
+      nodes: 1
+      gpus_per_node: 2
+    moe_shape: {global_experts: 512, top_k: 22, hidden_k: 4096, intermediate_n: 2688, layers: 88}
+    formula_knee: 5958
+    hybrid_action: native_only
+
+  - id: ultra550
+    model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/cutlass/e2m1/data/huggingface_models/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+    repo: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+    revision: null
+    topology:
+      engine_tp: 8
+      enable_expert_parallel: true
+      moe_tp: 1
+      moe_ep: 8
+      dp: 1
+      nodes: 1
+      gpus_per_node: 8
+    moe_shape: {global_experts: 512, top_k: 22, hidden_k: 8192, intermediate_n: 5120, layers: 108}
+    formula_knee: 5958
+    hybrid_action: native_only
+
+  - id: deepseek_r1
+    model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/mmpareto/hfcache/DeepSeek-R1-0528-NVFP4
+    repo: nvidia/DeepSeek-R1-0528-NVFP4
+    revision: null
+    topology:
+      engine_tp: 8
+      enable_expert_parallel: true
+      moe_tp: 1
+      moe_ep: 8
+      dp: 1
+      nodes: 1
+      gpus_per_node: 8
+    moe_shape: {global_experts: 256, top_k: 8, hidden_k: 7168, intermediate_n: 2048, layers: 61}
+    formula_knee: 8193
+    hybrid_action: native_only
+
+  - id: deepseek_v4_flash
+    model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/mmpareto/hfcache/DeepSeek-V4-Flash-NVFP4
+    repo: local-cache/DeepSeek-V4-Flash-NVFP4
+    revision: null
+    topology:
+      engine_tp: 4
+      enable_expert_parallel: true
+      moe_tp: 1
+      moe_ep: 4
+      dp: 1
+      nodes: 1
+      gpus_per_node: 4
+    moe_shape: {global_experts: 256, top_k: 6, hidden_k: 4096, intermediate_n: 2048, layers: 43}
+    formula_knee: 10923
+    hybrid_action: per_layer
+
+  - id: deepseek_v4_pro
+    model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/mmpareto/hfcache/DeepSeek-V4-Pro-NVFP4
+    repo: local-cache/DeepSeek-V4-Pro-NVFP4
+    revision: null
+    topology:
+      engine_tp: 16
+      enable_expert_parallel: true
+      moe_tp: 1
+      moe_ep: 16
+      dp: 1
+      nodes: 2
+      gpus_per_node: 8
+    moe_shape: {global_experts: 384, top_k: 6, hidden_k: 7168, intermediate_n: 3072, layers: 61}
+    formula_knee: 16385
+    hybrid_action: per_layer
+
+  - id: qwen397
+    model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/mmpareto/hfcache/Qwen3.5-397B-A17B-NVFP4
+    repo: nvidia/Qwen3.5-397B-A17B-NVFP4
+    revision: null
+    topology:
+      engine_tp: 4
+      enable_expert_parallel: false
+      moe_tp: 4
+      moe_ep: 1
+      dp: 1
+      nodes: 1
+      gpus_per_node: 4
+    moe_shape: {global_experts: 512, top_k: 10, hidden_k: 4096, intermediate_n: 1024, layers: 60}
+    formula_knee: 13108
+    hybrid_action: native_only
+    serving_overrides:
+      max_num_seqs: 320
+      max_num_batched_tokens: 8192
+      compilation_config: '{"pass_config":{"fuse_allreduce_rms":false}}'

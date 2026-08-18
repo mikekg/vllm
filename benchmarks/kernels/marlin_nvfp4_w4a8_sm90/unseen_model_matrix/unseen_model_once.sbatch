@@ -7,7 +7,7 @@
 #SBATCH --qos=normal
 #SBATCH --constraint=H100
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=28
 #SBATCH --time=04:00:00
 
 set -euo pipefail

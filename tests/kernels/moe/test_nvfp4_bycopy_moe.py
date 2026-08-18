@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.experts.nvfp4_bycopy_moe import (
     NvFp4ByCopyExperts,
     NvFp4ToFp8Experts,
     NvFp4ToFp8TritonExperts,
+    _deepgemm_shape_supported,
     _lookup_moe_m_knee,
     _moe_shape,
 )
@@ -29,6 +30,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Static
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import calc_diff
 
 
 def _config(
@@ -668,12 +670,13 @@ def test_real_staged_apply_matches_marlin(monkeypatch):
     not (
         current_platform.is_cuda()
         and current_platform.is_device_capability(90)
+        and _deepgemm_shape_supported(128, 512, 128, MoEActivation.SILU)
         and hasattr(torch.ops._C, "marlin_nvfp4_hybrid_moe")
     ),
     reason="The native hybrid NVFP4 MoE path requires SM90.",
 )
 @pytest.mark.usefixtures("default_vllm_config")
-def test_real_native_outer_matches_marlin_at_runtime_knee():
+def test_real_native_outer_matches_branch_references_at_runtime_knee():
     e, n, k, knee = 2, 512, 128, 128
     dtype = torch.bfloat16
     case = _real_nvfp4_case(e, knee, n, k)
@@ -698,7 +701,14 @@ def test_real_native_outer_matches_marlin_at_runtime_knee():
                 case.layer.w2_fp8_scale_divisor_code
             )
             assert native_experts._use_native(n, k, MoEActivation.SILU)
-            reference_experts = MarlinExperts(config, case.quant_config)
+            marlin_experts = MarlinExperts(config, case.quant_config)
+            deepgemm_experts = native_experts.bycopy_experts.experts
+            deepgemm_experts.w13_fp8_scale_divisor_code = (
+                case.layer.w13_fp8_scale_divisor_code
+            )
+            deepgemm_experts.w2_fp8_scale_divisor_code = (
+                case.layer.w2_fp8_scale_divisor_code
+            )
 
             for m in (knee - 1, knee):
                 rows = torch.arange(m, device="cuda")
@@ -717,6 +727,15 @@ def test_real_native_outer_matches_marlin_at_runtime_knee():
                     reference_weights = topk_weights
                 topk_weights = topk_weights.to(torch.float32)
                 reference_weights = reference_weights.to(torch.float32)
+                if m < knee:
+                    reference_experts = marlin_experts
+                    reference_apply_router_weight_on_input = False
+                else:
+                    reference_experts = deepgemm_experts
+                    reference_weights = topk_weights
+                    reference_apply_router_weight_on_input = (
+                        apply_router_weight_on_input
+                    )
 
                 reference_ws13, reference_ws2, _ = reference_experts.workspace_shapes(
                     m,
@@ -744,7 +763,7 @@ def test_real_native_outer_matches_marlin_at_runtime_knee():
                     torch.empty(reference_ws13, dtype=dtype, device="cuda"),
                     torch.empty(reference_ws2, dtype=dtype, device="cuda"),
                     None,
-                    False,
+                    reference_apply_router_weight_on_input,
                 )
 
                 native_ws13, native_ws2, _ = native_experts.workspace_shapes(
@@ -779,4 +798,12 @@ def test_real_native_outer_matches_marlin_at_runtime_knee():
                 )
 
                 assert reference.abs().max() > 0.1
-                torch.testing.assert_close(actual, reference, rtol=0.1, atol=4e-2)
+                if m < knee:
+                    torch.testing.assert_close(actual, reference, rtol=0.1, atol=4e-2)
+                else:
+                    diff = calc_diff(actual, reference)
+                    assert diff < 0.001, (
+                        f"DeepGEMM difference {diff} exceeded 0.001 for "
+                        f"routing={'ep' if expert_map is not None else 'local'}, "
+                        f"router_on_input={apply_router_weight_on_input}"
+                    )

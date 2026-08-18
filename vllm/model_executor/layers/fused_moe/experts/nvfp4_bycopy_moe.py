@@ -162,7 +162,13 @@ def _native_moe_arena_bytes(
     high = append(high, m_sum * k)
     high = append(high, m_sum * (k // block) * torch.float32.itemsize)
     high = append(high, m_sum * max(2 * n, k) * itemsize)
-    high = append(high, local_num_experts * 2 * n * k)
+    high = append(
+        high,
+        max(
+            local_num_experts * 2 * n * k,
+            m_sum * n * itemsize,
+        ),
+    )
     high = append(
         high,
         local_num_experts * (2 * n // block) * (k // block) * torch.float32.itemsize,

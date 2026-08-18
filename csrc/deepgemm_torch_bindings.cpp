@@ -27,9 +27,6 @@ struct RegisteredOps {
       "_C::per_token_group_fp8_quant", "");
   c10::OperatorHandle silu =
       c10::Dispatcher::singleton().findSchemaOrThrow("_C::silu_and_mul", "");
-  c10::OperatorHandle silu_quant =
-      c10::Dispatcher::singleton().findSchemaOrThrow(
-          "_C::silu_and_mul_per_block_quant", "");
   c10::OperatorHandle align = c10::Dispatcher::singleton().findSchemaOrThrow(
       "_moe_C::moe_align_block_size", "");
   c10::OperatorHandle marlin = c10::Dispatcher::singleton().findSchemaOrThrow(
@@ -247,7 +244,7 @@ void marlin_nvfp4_hybrid_moe(
                               .view({m_sum, k / block});
   Tensor gemm_output = take_bytes(m_sum * std::max(2 * n, k) * itemsize)
                            .view(hidden_states.scalar_type());
-  const int64_t weight_values = std::max(e * 2 * n * k, e * k * n);
+  const int64_t weight_values = std::max(e * 2 * n * k, m_sum * n * itemsize);
   Tensor weight_scratch = take_bytes(weight_values).view(at::kFloat8_e4m3fn);
   const int64_t weight_scale_values = std::max(
       e * (2 * n / block) * (k / block), e * (k / block) * (n / block));
@@ -284,21 +281,25 @@ void marlin_nvfp4_hybrid_moe(
   deep_gemm_m_grouped_fp8_gemm_nt_contiguous(
       permuted_input, permuted_scale, w13_fp8, w13_fp8_scale, mm1, expert_ids);
 
-  Tensor w2_fp8 = weight_scratch.narrow(0, 0, e * k * n).view({e, k, n});
-  Tensor w2_fp8_scale =
-      weight_scale_scratch.narrow(0, 0, e * (k / block) * (n / block))
-          .view({e, k / block, n / block});
-  call_converter(w2_fp8, w2_fp8_scale, w2, w2_scales, w2_global_scale,
-                 w2_divisor_codes, hidden_states.scalar_type());
-
   Tensor a2q = quant_scratch.narrow(0, 0, m_sum * n)
                    .view(at::kFloat8_e4m3fn)
                    .view({m_sum, n});
   Tensor a2_scale = scale_scratch.narrow(0, 0, (n / block) * m_sum)
                         .view({n / block, m_sum})
                         .transpose(0, 1);
-  call_boxed(registered_ops().silu_quant,
-             {a2q, mm1, a2_scale, block, c10::IValue(), true});
+  Tensor a2 = weight_scratch.narrow(0, 0, m_sum * n * itemsize)
+                  .view(hidden_states.scalar_type())
+                  .view({m_sum, n});
+  call_boxed(registered_ops().silu, {a2, mm1});
+  call_boxed(registered_ops().quant, {a2, a2q, a2_scale, block, 1.0e-10, -448.0,
+                                      448.0, false, false, false});
+
+  Tensor w2_fp8 = weight_scratch.narrow(0, 0, e * k * n).view({e, k, n});
+  Tensor w2_fp8_scale =
+      weight_scale_scratch.narrow(0, 0, e * (k / block) * (n / block))
+          .view({e, k / block, n / block});
+  call_converter(w2_fp8, w2_fp8_scale, w2, w2_scales, w2_global_scale,
+                 w2_divisor_codes, hidden_states.scalar_type());
   Tensor mm2 = gemm_output.narrow(0, 0, m_sum * k).view({m_sum, k});
   deep_gemm_m_grouped_fp8_gemm_nt_contiguous(a2q, a2_scale, w2_fp8,
                                              w2_fp8_scale, mm2, expert_ids);

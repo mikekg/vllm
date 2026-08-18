@@ -767,32 +767,34 @@ was neutral, B at 4608 was lower in this sample, and B at 4096 was neutral.
 Each cutoff changes which invocations use the hybrid path, but these serial
 runs do not separate that effect from run-to-run generation variability.
 
-The later serialized full-hybrid knee matrix uses one common W4A16 baseline
+The later serialized full-hybrid knee matrix uses W4A16 baseline job 6646346
 and retains per-question details for every candidate. These are the completed
-points so far:
+points:
 
-| MoE knee | Variant | Correct / 1,319 | Accuracy | Output tok/s | `n01` improvements | `n10` regressions | Accuracy delta | Exact McNemar p |
-|---:|---|---:|---:|---:|---:|---:|---:|---:|
-| — | W4A16 baseline | 1,164 | 0.8824867 | 4,236.742 | — | — | — | — |
-| 3,072 | full hybrid | 1,163 | 0.8817286 | 4,100.469 | 22 | 23 | -0.075815 pp | 1.0000000 |
-| 3,584 | full hybrid | 1,158 | 0.8779378 | 4,136.298 | 17 | 23 | -0.454890 pp | 0.4295905 |
-| 4,080 | full hybrid | 1,155 | 0.8756634 | 3,997.598 | 16 | 25 | -0.682335 pp | 0.2110236 |
-| 4,096 | full hybrid | 1,168 | 0.8855193 | 4,016.346762 | 22 | 18 | +0.303260 pp | 0.6358280 |
-| 4,112 | full hybrid | 1,163 | 0.8817286 | 4,075.060913 | 14 | 15 | -0.075815 pp | 1.0000000 |
-| 4,352 | full hybrid | 1,167 | 0.8847612 | 4,155.321188 | 21 | 18 | +0.227445 pp | 0.7492586 |
-| 4,608 | full hybrid | 1,162 | 0.8809704 | 4,051.695302 | 20 | 22 | -0.151630 pp | 0.8776143 |
-| 4,864 | full hybrid | 1,156 | 0.8764215 | 4,017.315449 | 19 | 27 | -0.606520 pp | 0.3019956 |
-| 5,120 | full hybrid | 1,162 | 0.8809704 | 3,959.390619 | 17 | 19 | -0.151630 pp | 0.8679394 |
-| 6,144 | full hybrid | 1,167 | 0.8847612 | 4,066.141670 | 19 | 16 | +0.227445 pp | 0.7358788 |
-| 7,168 | full hybrid | 1,161 | 0.8802123 | 4,048.156943 | 19 | 22 | -0.227445 pp | 0.7552287 |
-| 8,192 | full hybrid | 1,152 | 0.8733889 | 4,123.041416 | 13 | 25 | -0.909780 pp | 0.0729514 |
+| MoE knee | Job | Correct / 1,319 | Accuracy | Output tok/s | TPS delta | `n01` improvements | `n10` regressions | Accuracy delta | Exact McNemar p |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| — | 6646346 | 1,164 | 0.8824867 | 4,236.742 | — | — | — | — | — |
+| 3,072 | 6646351 | 1,163 | 0.8817286 | 4,100.469 | -3.216% | 22 | 23 | -0.075815 pp | 1.0000000 |
+| 3,584 | 6646353 | 1,158 | 0.8779378 | 4,136.298 | -2.371% | 17 | 23 | -0.454890 pp | 0.4295905 |
+| 4,080 | 6646355 | 1,155 | 0.8756634 | 3,997.598 | -5.645% | 16 | 25 | -0.682335 pp | 0.2110236 |
+| 4,096 | 6646357 | 1,168 | 0.8855193 | 4,016.347 | -5.202% | 22 | 18 | +0.303260 pp | 0.6358280 |
+| 4,112 | 6646359 | 1,163 | 0.8817286 | 4,075.061 | -3.816% | 14 | 15 | -0.075815 pp | 1.0000000 |
+| 4,352 | 6646361 | 1,167 | 0.8847612 | 4,155.321 | -1.922% | 21 | 18 | +0.227445 pp | 0.7492586 |
+| 4,608 | 6646363 | 1,162 | 0.8809704 | 4,051.695 | -4.368% | 20 | 22 | -0.151630 pp | 0.8776143 |
+| 4,864 | 6646365 | 1,156 | 0.8764215 | 4,017.315 | -5.179% | 19 | 27 | -0.606520 pp | 0.3019956 |
+| 5,120 | 6646367 | 1,162 | 0.8809704 | 3,959.391 | -6.546% | 17 | 19 | -0.151630 pp | 0.8679394 |
+| 6,144 | 6646369 | 1,167 | 0.8847612 | 4,066.142 | -4.027% | 19 | 16 | +0.227445 pp | 0.7358788 |
+| 7,168 | 6646371 | 1,161 | 0.8802123 | 4,048.157 | -4.451% | 19 | 22 | -0.227445 pp | 0.7552287 |
+| 8,192 | 6646373 | 1,152 | 0.8733889 | 4,123.041 | -2.684% | 13 | 25 | -0.909780 pp | 0.0729514 |
 
 Here `n01` means baseline wrong and candidate right; `n10` means baseline
 right and candidate wrong. All 12 candidate comparisons have two-sided paired
 p-values above 0.05; knee 8192 is closest at 0.0729514. These candidates were
 built before commit `42551d2aaa`, so their dense hybrid could still process the
 router gate. They record that earlier execution path; router-guard measurements
-use the same paired format as a separate comparison. Artifacts are under
+use the same paired format as a separate comparison. Evaluator TPS includes
+different generated-token counts and is not a matched-token serving result.
+Artifacts are under
 `.benchmark/gsm8k-q3-knee-matrix-q3-knees-20260818-r2/`.
 
 The post-router-guard A/B/C repetition used the derived `M_knee=4097` and
@@ -935,6 +937,40 @@ router dispatch, global-E knees under local expert sharding, TP and pure-EP
 support, the `N=496/512` backend boundary, runtime K/N extraction, and clearing
 remote EP slots before the second staged-Triton GEMM.
 
+## Final ABI-matched validation artifact
+
+OCI-NRT build job 6166032 produced
+`native-overlay-9340d68ade-r1` from source `9340d68ade`. The artifact targets
+the serving container's PyTorch 2.11.0+cu130 and vLLM 0.24.0 ABI. Its manifest
+records base stable-ABI DSO hash prefix `7d723b` and extension hash prefix
+`ffa52a`.
+
+H100 smoke job 6166055 loaded that overlay through the container's bind-mounted
+paths and reported 3 passed in 12.31 seconds. The cases exercised the native
+hybrid operation, an `M=1` call below `M_knee=2` that selected Marlin, and an
+`M=3` call above `M_knee=1` that selected padded FP8.
+
+## Unseen-model validation campaign
+
+Campaign `unseen-9340d68ade-20260818-r1` uses the tracked model matrix at the
+same source commit. Its 11 cached model entries are `nano30`, `super120`,
+`ultra550`, `deepseek_r1`, `deepseek_v4_flash`, `deepseek_v4_pro`, `qwen397`,
+`qwen36_35b`, `gemma4_26b`, `nano4_dense`, and `nano30_omni`.
+
+The performance graph contains 88 GPU services: 11 models, two variants, and
+the 1k/1k, 5k/1k, 8k/1k, and 50k/1k workloads. Every service runs the complete
+power-of-two concurrency ladder from 1 through 512. The 77 intervening CPU
+jobs provide five-minute shutdown separation without holding GPUs. The GSM8K
+graph contains 22 GPU services and 11 equivalent CPU gaps; each model retains
+all 1,319 per-question outcomes for an exact paired McNemar comparison.
+
+The native-reference variant disables only
+`MarlinNvFp4ToFp8LinearKernel` and `NvFp4ByCopyExperts`. The adaptive variant
+keeps the per-invocation M selector, the global-expert/top-k knee formula, and
+the exact-object router guard. Native NVFP4 W4A4 and non-NVFP4 paths are
+unchanged in both variants. The controller accepted the campaign as job IDs
+6166687 through 6166885.
+
 ## Remaining measurements and decisions
 
 The unresolved evidence and implementation work is:
@@ -944,8 +980,7 @@ The unresolved evidence and implementation work is:
 2. Complete shape records for three or more additional MoE shapes.
 3. Cross-shape comparison of the generic 256-row rule and measured
    crossover.
-4. Post-router-guard Q3 serving and paired-accuracy repetitions, plus full
-   ladders on additional model shapes.
+4. Results from the submitted full ladders on the additional model shapes.
 5. Separate interpretation of local positive gain and the overall 20–40%
    model-throughput objective.
 6. A native selectable expert operation using the proven Python sequence as

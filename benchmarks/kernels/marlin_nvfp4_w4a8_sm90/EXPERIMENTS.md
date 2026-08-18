@@ -3116,24 +3116,24 @@ knee 8192 job 6646261:
 All 130 concurrency points completed with zero nonempty benchmark errors.
 
 The serialized GSM8K matrix uses the same Q3 revision, deterministic decoding,
-1,319 five-shot questions, one common W4A16 baseline, and one full-hybrid
+1,319 five-shot questions, W4A16 baseline job 6646346, and one full-hybrid
 candidate per MoE knee. The completed points are:
 
-| MoE knee | Variant | Correct / 1,319 | Accuracy | Output tok/s | `n01` | `n10` | Accuracy delta | Exact two-sided McNemar p |
-|---:|---|---:|---:|---:|---:|---:|---:|---:|
-| — | W4A16 baseline | 1,164 | 0.8824867 | 4,236.742 | — | — | — | — |
-| 3,072 | full hybrid | 1,163 | 0.8817286 | 4,100.469 | 22 | 23 | -0.075815 pp | 1.0000000 |
-| 3,584 | full hybrid | 1,158 | 0.8779378 | 4,136.298 | 17 | 23 | -0.454890 pp | 0.4295905 |
-| 4,080 | full hybrid | 1,155 | 0.8756634 | 3,997.598 | 16 | 25 | -0.682335 pp | 0.2110236 |
-| 4,096 | full hybrid | 1,168 | 0.8855193 | 4,016.346762 | 22 | 18 | +0.303260 pp | 0.6358280 |
-| 4,112 | full hybrid | 1,163 | 0.8817286 | 4,075.060913 | 14 | 15 | -0.075815 pp | 1.0000000 |
-| 4,352 | full hybrid | 1,167 | 0.8847612 | 4,155.321188 | 21 | 18 | +0.227445 pp | 0.7492586 |
-| 4,608 | full hybrid | 1,162 | 0.8809704 | 4,051.695302 | 20 | 22 | -0.151630 pp | 0.8776143 |
-| 4,864 | full hybrid | 1,156 | 0.8764215 | 4,017.315449 | 19 | 27 | -0.606520 pp | 0.3019956 |
-| 5,120 | full hybrid | 1,162 | 0.8809704 | 3,959.390619 | 17 | 19 | -0.151630 pp | 0.8679394 |
-| 6,144 | full hybrid | 1,167 | 0.8847612 | 4,066.141670 | 19 | 16 | +0.227445 pp | 0.7358788 |
-| 7,168 | full hybrid | 1,161 | 0.8802123 | 4,048.156943 | 19 | 22 | -0.227445 pp | 0.7552287 |
-| 8,192 | full hybrid | 1,152 | 0.8733889 | 4,123.041416 | 13 | 25 | -0.909780 pp | 0.0729514 |
+| MoE knee | Job | Correct / 1,319 | Accuracy | Output tok/s | TPS delta | `n01` | `n10` | Accuracy delta | Exact two-sided McNemar p |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| — | 6646346 | 1,164 | 0.8824867 | 4,236.742 | — | — | — | — | — |
+| 3,072 | 6646351 | 1,163 | 0.8817286 | 4,100.469 | -3.216% | 22 | 23 | -0.075815 pp | 1.0000000 |
+| 3,584 | 6646353 | 1,158 | 0.8779378 | 4,136.298 | -2.371% | 17 | 23 | -0.454890 pp | 0.4295905 |
+| 4,080 | 6646355 | 1,155 | 0.8756634 | 3,997.598 | -5.645% | 16 | 25 | -0.682335 pp | 0.2110236 |
+| 4,096 | 6646357 | 1,168 | 0.8855193 | 4,016.347 | -5.202% | 22 | 18 | +0.303260 pp | 0.6358280 |
+| 4,112 | 6646359 | 1,163 | 0.8817286 | 4,075.061 | -3.816% | 14 | 15 | -0.075815 pp | 1.0000000 |
+| 4,352 | 6646361 | 1,167 | 0.8847612 | 4,155.321 | -1.922% | 21 | 18 | +0.227445 pp | 0.7492586 |
+| 4,608 | 6646363 | 1,162 | 0.8809704 | 4,051.695 | -4.368% | 20 | 22 | -0.151630 pp | 0.8776143 |
+| 4,864 | 6646365 | 1,156 | 0.8764215 | 4,017.315 | -5.179% | 19 | 27 | -0.606520 pp | 0.3019956 |
+| 5,120 | 6646367 | 1,162 | 0.8809704 | 3,959.391 | -6.546% | 17 | 19 | -0.151630 pp | 0.8679394 |
+| 6,144 | 6646369 | 1,167 | 0.8847612 | 4,066.142 | -4.027% | 19 | 16 | +0.227445 pp | 0.7358788 |
+| 7,168 | 6646371 | 1,161 | 0.8802123 | 4,048.157 | -4.451% | 19 | 22 | -0.227445 pp | 0.7552287 |
+| 8,192 | 6646373 | 1,152 | 0.8733889 | 4,123.041 | -2.684% | 13 | 25 | -0.909780 pp | 0.0729514 |
 
 `n01` counts baseline-wrong/candidate-right pairs and `n10` counts
 baseline-right/candidate-wrong pairs. All 12 candidate comparisons have
@@ -3141,7 +3141,8 @@ two-sided p-values above 0.05; the closest is knee 8,192 at 0.0729514. They
 used the pre-`42551d2aaa` build in which the dense hybrid could process the
 router gate. Artifacts are under
 `.benchmark/gsm8k-q3-knee-matrix-q3-knees-20260818-r2/`, with both summary JSON
-and per-question JSONL data.
+and per-question JSONL data. Evaluator TPS includes different generated-token
+counts and is not a matched-token serving comparison.
 
 ## 60. Router guard and TP/pure-EP implementation
 
@@ -3217,3 +3218,40 @@ C: hybrid dense + hybrid MoE, job 6646400:
 ```
 
 All 30 Q36 concurrency points completed with zero nonempty benchmark errors.
+
+## 62. Final ABI-matched overlay and H100 smoke
+
+OCI-NRT build job 6166032 produced artifact
+`native-overlay-9340d68ade-r1` from source `9340d68ade`. The manifest identifies
+PyTorch 2.11.0+cu130, vLLM 0.24.0, base stable-ABI DSO hash prefix `7d723b`, and
+extension hash prefix `ffa52a`.
+
+H100 smoke job 6166055 loaded the overlay through absolute bind-mounted paths
+and reported 3 passed in 12.31 seconds. It covered the native hybrid operation,
+the below-knee Marlin branch at `M=1`, `M_knee=2`, and the padded-FP8 branch at
+`M=3`, `M_knee=1`.
+
+## 63. Eleven-model serving and accuracy campaign
+
+Campaign `unseen-9340d68ade-20260818-r1` was rendered from the tracked model
+matrix for the same source and overlay. It includes `nano30`, `super120`,
+`ultra550`, `deepseek_r1`, `deepseek_v4_flash`, `deepseek_v4_pro`, `qwen397`,
+`qwen36_35b`, `gemma4_26b`, `nano4_dense`, and `nano30_omni`.
+
+The submitted graph consists of:
+
+- 88 performance GPU services: 11 models, native-reference and adaptive
+  variants, and 1k/1k, 5k/1k, 8k/1k, and 50k/1k workloads;
+- the full concurrency sequence `[1, 2, 4, 8, 16, 32, 64, 128, 256, 512]`
+  inside every performance service;
+- 77 five-minute CPU-only gaps between successive performance services;
+- 22 full 1,319-question GSM8K GPU services with retained per-question JSONL;
+- 11 five-minute CPU-only gaps between each model's reference and adaptive
+  GSM8K services.
+
+The native-reference service disables exactly
+`MarlinNvFp4ToFp8LinearKernel` and `NvFp4ByCopyExperts`, preserving the normal
+selection of unrelated backends. The adaptive service retains runtime M
+selection, the `floor(256 * global_experts / top_k) + 1` MoE knee, and Marlin
+dispatch for marked router gates. Native NVFP4 W4A4 remains on its existing
+path. Slurm accepted the graph under job IDs 6166687 through 6166885.

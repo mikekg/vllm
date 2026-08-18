@@ -115,6 +115,7 @@ load(
     extra_cuda_cflags=[
         "-O3",
         "--expt-relaxed-constexpr",
+        "--expt-extended-lambda",
         "-std=c++20",
         "-static-global-template-stub=false",
         "-U__CUDA_NO_HALF_OPERATORS__",

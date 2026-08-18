@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 import torch
-from cuda.pathfinder import find_nvidia_header_directory
+from cuda.pathfinder import find_nvidia_header_directory, load_nvidia_dynamic_lib
 from torch.utils import cpp_extension
 
 if len(sys.argv) != 4:
@@ -67,6 +67,9 @@ if cuda_home is None:
 cusparse_include = find_nvidia_header_directory("cusparse")
 if cusparse_include is None:
     sys.exit("cuSPARSE headers not found; cannot build DeepGEMM _C")
+nvrtc = load_nvidia_dynamic_lib("nvrtc")
+if nvrtc.abs_path is None:
+    sys.exit("NVRTC library path not found; cannot build DeepGEMM _C")
 # CCCL lives outside the standard CUDAToolkit search (mirrors DeepGEMM's setup.py).
 includes = [
     info["INCLUDEPY"],
@@ -105,7 +108,7 @@ cmd = [
     "-lc10",
     "-lc10_cuda",
     "-lcudart",
-    "-lnvrtc",
+    nvrtc.abs_path,
     "-o",
     str(out / f"_C{info['EXT_SUFFIX']}"),
 ]

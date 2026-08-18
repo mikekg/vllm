@@ -14,6 +14,7 @@ set -euo pipefail
 
 : "${1:?generated environment file required}"
 config=$1
+srun=$(command -v srun)
 source "$config"
 
 : "${IMAGE:?}"
@@ -22,5 +23,5 @@ source "$config"
 : "${RUN_SCRIPT:?}"
 
 LD_PRELOAD= LD_LIBRARY_PATH= PYTHONPATH= \
-  srun --container-image="$IMAGE" --container-mounts="$MOUNTS" \
+  "$srun" --container-image="$IMAGE" --container-mounts="$MOUNTS" \
   --no-container-entrypoint bash "$SCRIPTS/$RUN_SCRIPT" "$config"

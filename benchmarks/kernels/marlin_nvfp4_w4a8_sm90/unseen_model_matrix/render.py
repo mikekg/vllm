@@ -66,10 +66,8 @@ def validate(data: dict) -> None:
 
 
 def harness(runtime: dict) -> str:
-    suffix = (
-        "build-source/benchmarks/kernels/marlin_nvfp4_w4a8_sm90/unseen_model_matrix"
-    )
-    return f"{runtime['root']}/{suffix}"
+    del runtime
+    return str(HERE)
 
 
 def extra_serve(model: dict, kv_cache_memory_bytes: int) -> str:

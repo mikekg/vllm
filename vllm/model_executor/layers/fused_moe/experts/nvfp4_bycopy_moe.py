@@ -64,7 +64,7 @@ _FP8_BLOCK_SHAPE = [128, 128]
 
 def _moe_shape(moe_config: FusedMoEConfig) -> MoeShape:
     return (
-        moe_config.num_local_experts,
+        moe_config.num_logical_experts,
         moe_config.intermediate_size_per_partition,
         moe_config.hidden_dim,
         moe_config.experts_per_token,
@@ -77,8 +77,9 @@ def _lookup_moe_m_knee(
     dtype: torch.dtype,
     shape: MoeShape,
 ) -> int | None:
-    del device_name, dtype, shape
-    return None
+    del device_name, dtype
+    experts, _, _, topk, _ = shape
+    return 256 * experts // topk + 1
 
 
 def _deepgemm_shape_supported(
@@ -87,7 +88,7 @@ def _deepgemm_shape_supported(
     return (
         activation == MoEActivation.SILU
         and is_deep_gemm_supported()
-        and n > 512
+        and n >= 512
         and _valid_deep_gemm_shape(m, 2 * n, k)
         and _valid_deep_gemm_shape(m, k, n)
     )
@@ -367,6 +368,8 @@ class NvFp4ToFp8TritonExperts(TritonExperts):
             self.w2_fp8_scale_divisor_code,
             self.moe_config.in_dtype,
         )
+        if expert_map is not None:
+            intermediate3.zero_()
         invoke_fused_moe_triton_kernel(
             qintermediate2,
             w2_fp8,
@@ -551,10 +554,9 @@ class NvFp4ToFp8Experts(FallbackExperts):
         return experts.workspace_shapes(M, N, K, *args, **kwargs)
 
     def _select_experts_impl(self, hidden_states, w1, w2):
-        del w1, w2
         m = hidden_states.shape[0]
-        n = self.moe_config.intermediate_size_per_partition
-        k = self.moe_config.hidden_dim
+        n = marlin_moe_intermediate_size(w1, w2)
+        k = hidden_states.shape[-1]
         return self.experts if self._use_deepgemm(m, n, k) else self.fallback_experts
 
 
@@ -604,13 +606,19 @@ class NvFp4ByCopyExperts(FallbackExperts):
         cls,
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
+        ordinary_tp = (
+            not moe_parallel_config.use_ep and moe_parallel_config.ep_size == 1
+        )
+        pure_ep = (
+            moe_parallel_config.use_ep
+            and moe_parallel_config.tp_size == 1
+            and moe_parallel_config.ep_size > 1
+        )
         return (
-            moe_parallel_config.tp_size == 1
+            (ordinary_tp or pure_ep)
             and moe_parallel_config.pcp_size == 1
             and moe_parallel_config.dp_size == 1
-            and moe_parallel_config.ep_size == 1
             and moe_parallel_config.sp_size == 1
-            and not moe_parallel_config.use_ep
             and not moe_parallel_config.enable_eplb
             and super()._supports_parallel_config(moe_parallel_config)
         )

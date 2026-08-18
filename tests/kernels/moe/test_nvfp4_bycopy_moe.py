@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.experts.nvfp4_bycopy_moe import (
     NvFp4ToFp8Experts,
     NvFp4ToFp8TritonExperts,
     _lookup_moe_m_knee,
+    _moe_shape,
 )
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
@@ -52,29 +53,61 @@ def _config(
 def test_universal_knee_and_post_dispatch_selection():
     assert (
         _lookup_moe_m_knee("unknown GPU", torch.float16, (128, 704, 2048, 8, True))
-        is None
+        == 4097
+    )
+    assert (
+        _lookup_moe_m_knee("unknown GPU", torch.float16, (256, 512, 2048, 8, True))
+        == 8193
+    )
+    assert (
+        _lookup_moe_m_knee("unknown GPU", torch.float16, (16, 1024, 2048, 4, True))
+        == 1025
+    )
+    ep_config = replace(_config(), num_local_experts=64)
+    assert (
+        _lookup_moe_m_knee("unknown GPU", torch.float16, _moe_shape(ep_config)) == 4097
     )
 
     experts = object.__new__(NvFp4ByCopyExperts)
-    experts.m_knee = None
-    assert not experts._use_bycopy(511)
-    assert not experts._use_bycopy(8192)
+    experts.m_knee = 4097
+    assert not experts._use_bycopy(4096)
+    assert experts._use_bycopy(4097)
 
 
 def test_deepgemm_selector_uses_runtime_m_and_static_layer_shape(monkeypatch):
     experts = object.__new__(NvFp4ToFp8Experts)
-    experts.moe_config = _config()
+    experts.moe_config = _config(p=704, k=2112)
     experts.experts = MagicMock()
     experts.fallback_experts = MagicMock()
     supported = MagicMock(return_value=True)
     monkeypatch.setattr(nvfp4_bycopy_moe, "_deepgemm_shape_supported", supported)
 
     selected = experts._select_experts_impl(
-        torch.empty((6144, 1), device="meta"), MagicMock(), MagicMock()
+        torch.empty((6144, 2048), device="meta"),
+        torch.empty((64, 1, 1), device="meta"),
+        torch.empty((64, 48, 1), device="meta"),
     )
 
     assert selected is experts.experts
     supported.assert_called_once_with(6144, 768, 2048, MoEActivation.SILU)
+
+
+@pytest.mark.parametrize(("n", "uses_deepgemm"), [(496, False), (512, True)])
+def test_deepgemm_selector_n_boundary(monkeypatch, n, uses_deepgemm):
+    experts = object.__new__(NvFp4ToFp8Experts)
+    experts.moe_config = _config(p=704)
+    experts.experts = MagicMock()
+    experts.fallback_experts = MagicMock()
+    monkeypatch.setattr(nvfp4_bycopy_moe, "is_deep_gemm_supported", lambda: True)
+    monkeypatch.setattr(nvfp4_bycopy_moe, "_valid_deep_gemm_shape", lambda *_: True)
+
+    selected = experts._select_experts_impl(
+        torch.empty((8192, 2048), device="meta"),
+        torch.empty((64, 1, 1), device="meta"),
+        torch.empty((64, n // 16, 1), device="meta"),
+    )
+
+    assert (selected is experts.experts) is uses_deepgemm
 
 
 def test_workspace_includes_padded_silu_and_one_overlaid_weight():
@@ -153,7 +186,7 @@ def test_enabled_path_binds_codes_and_reserves_all_backends(monkeypatch):
     reserve.assert_called_once_with(1280)
 
 
-def test_support_is_exact_tp1_and_fail_closed(monkeypatch):
+def test_support_accepts_tp_and_pure_ep_but_rejects_dp(monkeypatch):
     config = _config()
     monkeypatch.setattr(
         NvFp4ByCopyExperts,
@@ -185,6 +218,17 @@ def test_support_is_exact_tp1_and_fail_closed(monkeypatch):
     assert supported(_config(k=2112))
     assert not supported(_config(p=100))
     assert not supported(_config(k=2100))
+    tp = replace(config.moe_parallel_config, tp_size=2, tp_rank=0)
+    assert supported(replace(config, moe_parallel_config=tp))
+    ep = replace(
+        config.moe_parallel_config,
+        tp_size=1,
+        tp_rank=0,
+        ep_size=2,
+        ep_rank=0,
+        use_ep=True,
+    )
+    assert supported(replace(config, moe_parallel_config=ep))
     parallel = replace(config.moe_parallel_config, dp_size=2)
     assert not supported(replace(config, moe_parallel_config=parallel))
     eplb = replace(config.moe_parallel_config, enable_eplb=True)
@@ -268,7 +312,7 @@ def test_staged_apply_pads_tails_and_reuses_weight_scratch(
         m, n, k, topk, e, e, None, activation
     )
     workspace13 = torch.empty(ws13_shape, dtype=dtype)
-    workspace2 = torch.empty(ws2_shape, dtype=dtype)
+    workspace2 = torch.ones(ws2_shape, dtype=dtype)
 
     assignment = (
         None,
@@ -289,7 +333,13 @@ def test_staged_apply_pads_tails_and_reuses_weight_scratch(
         side_effect=lambda *args, **kwargs: events.append("fused_quant")
     )
     assignment_mock = MagicMock(return_value=assignment)
-    gemm = MagicMock(side_effect=lambda *args, **kwargs: events.append("gemm"))
+
+    def run_gemm(*args, **kwargs):
+        if events.count("gemm"):
+            assert torch.count_nonzero(args[2]) == 0
+        events.append("gemm")
+
+    gemm = MagicMock(side_effect=run_gemm)
     config_mock = MagicMock(return_value={"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64})
     monkeypatch.setattr(nvfp4_bycopy_moe.ops, "marlin_nvfp4_to_fp8", materialize)
     monkeypatch.setattr(nvfp4_bycopy_moe, "moe_kernel_quantize_input", quantize)
@@ -316,7 +366,7 @@ def test_staged_apply_pads_tails_and_reuses_weight_scratch(
         topk_ids,
         activation,
         e,
-        None,
+        torch.tensor([0, -1], dtype=torch.int32),
         None,
         None,
         workspace13,

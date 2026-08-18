@@ -1210,9 +1210,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
     "VLLM_SKIP_P2P_CHECK": lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
     # List of quantization kernels that should be disabled, used for testing
-    # and performance comparisons. Currently only affects MPLinearKernel
-    # selection
-    # (kernels: MacheteLinearKernel, MarlinLinearKernel, ExllamaLinearKernel)
+    # and performance comparisons.
     "VLLM_DISABLED_KERNELS": lambda: (
         []
         if "VLLM_DISABLED_KERNELS" not in os.environ

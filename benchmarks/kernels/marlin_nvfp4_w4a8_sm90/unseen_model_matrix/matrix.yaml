@@ -149,3 +149,66 @@ models:
       max_num_seqs: 320
       max_num_batched_tokens: 8192
       compilation_config: '{"pass_config":{"fuse_allreduce_rms":false}}'
+
+  - id: qwen36_35b
+    model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/cutlass/e2m1/data/huggingface_models/nvidia/Qwen3.6-35B-A3B-NVFP4
+    repo: nvidia/Qwen3.6-35B-A3B-NVFP4
+    revision: 491c2f1ea524c639598bf8fa787a93fed5a6fbce
+    topology:
+      engine_tp: 1
+      enable_expert_parallel: false
+      moe_tp: 1
+      moe_ep: 1
+      dp: 1
+      nodes: 1
+      gpus_per_node: 1
+    moe_shape: {global_experts: 256, top_k: 8, hidden_k: 2048, intermediate_n: 512, layers: 40}
+    formula_knee: 8193
+    hybrid_action: per_layer
+
+  - id: gemma4_26b
+    model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/cutlass/e2m1/data/huggingface_models/nvidia/Gemma-4-26B-A4B-NVFP4
+    repo: nvidia/Gemma-4-26B-A4B-NVFP4
+    revision: a19cfe00be84568a6867111c9a68c9c44fdcffe6
+    topology:
+      engine_tp: 1
+      enable_expert_parallel: false
+      moe_tp: 1
+      moe_ep: 1
+      dp: 1
+      nodes: 1
+      gpus_per_node: 1
+    moe_shape: {global_experts: 128, top_k: 8, hidden_k: 2816, intermediate_n: 704, layers: 30}
+    formula_knee: 4097
+    hybrid_action: native_only
+
+  - id: nano4_dense
+    model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/cutlass/e2m1/data/huggingface_models/nvidia/NVIDIA-Nemotron-3-Nano-4B-NVFP4
+    repo: nvidia/NVIDIA-Nemotron-3-Nano-4B-NVFP4
+    revision: 2fdedbed2ab7614cf2be14bea35d880e59e91580
+    topology:
+      engine_tp: 1
+      enable_expert_parallel: false
+      moe_tp: 1
+      moe_ep: 1
+      dp: 1
+      nodes: 1
+      gpus_per_node: 1
+    dense_shape: {hidden_k: 3136, intermediate_n: 12544, layers: 42}
+    hybrid_action: native_only
+
+  - id: nano30_omni
+    model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/cutlass/e2m1/data/huggingface_models/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
+    repo: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
+    revision: null
+    topology:
+      engine_tp: 1
+      enable_expert_parallel: false
+      moe_tp: 1
+      moe_ep: 1
+      dp: 1
+      nodes: 1
+      gpus_per_node: 1
+    moe_shape: {global_experts: 128, top_k: 6, hidden_k: 2688, intermediate_n: 1856, layers: 52}
+    formula_knee: 5462
+    hybrid_action: native_only

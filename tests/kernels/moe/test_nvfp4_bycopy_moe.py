@@ -236,6 +236,8 @@ def test_support_accepts_tp_and_pure_ep_but_rejects_dp(monkeypatch):
 
 
 def test_internal_oracle_backend_precedes_marlin(monkeypatch):
+    monkeypatch.delenv("VLLM_DISABLED_KERNELS", raising=False)
+
     class Support:
         @staticmethod
         def is_supported_config(*args, **kwargs):
@@ -257,6 +259,9 @@ def test_internal_oracle_backend_precedes_marlin(monkeypatch):
     monkeypatch.setattr(nvfp4_oracle, "backend_to_kernel_cls", classes)
     backend, _ = nvfp4_oracle.select_nvfp4_moe_backend(_config(), kNvfp4Static, None)
     assert backend == nvfp4_oracle.NvFp4MoeBackend.MARLIN_FP8_BYCOPY
+    monkeypatch.setenv("VLLM_DISABLED_KERNELS", "NvFp4ByCopyExperts")
+    backend, _ = nvfp4_oracle.select_nvfp4_moe_backend(_config(), kNvfp4Static, None)
+    assert backend == nvfp4_oracle.NvFp4MoeBackend.MARLIN
     assert (
         nvfp4_oracle.map_nvfp4_backend("marlin") == nvfp4_oracle.NvFp4MoeBackend.MARLIN
     )

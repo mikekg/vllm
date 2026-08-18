@@ -17,7 +17,9 @@ source "$1"
 : "${CACHE_ROOT:?}"
 : "${PYTHON:?}"
 
-PORT=${PORT:-8000}
+: "${SLURM_JOB_ID:?}"
+PORT=${PORT:-$((10000 + SLURM_JOB_ID % 20000))}
+MASTER_PORT=${MASTER_PORT:-$((30000 + SLURM_JOB_ID % 20000))}
 GPU_UTIL=${GPU_UTIL:-0.9}
 RANGE_RATIO=${RANGE_RATIO:-0.8}
 MML=${MML_OVERRIDE:-$((ISL + OSL + 64))}
@@ -48,6 +50,7 @@ if ((NODES > 1)); then
     --nnodes "$NODES"
     --node-rank "$NODE_RANK"
     --master-addr "$SLURM_LAUNCH_NODE_IPADDR"
+    --master-port "$MASTER_PORT"
   )
   ((NODE_RANK > 0)) && server+=(--headless)
 fi
@@ -68,14 +71,20 @@ cleanup() {
 trap cleanup EXIT
 
 if ((NODE_RANK > 0)); then
-  status=0
-  wait "$server_pid" || status=$?
-  [[ -e $STOP ]] && exit
-  exit "$status"
+  while [[ ! -e $STOP ]] && kill -0 "$server_pid" 2>/dev/null; do
+    sleep 1
+  done
+  if [[ -e $STOP ]]; then
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+    exit
+  fi
+  wait "$server_pid"
+  exit
 fi
 
 ready=0
-for _ in {1..240}; do
+for _ in {1..360}; do
   if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null; then
     ready=1
     break
@@ -113,9 +122,9 @@ fi
 : "${CONCS:?}"
 IFS=, read -r -a concurrencies <<<"$CONCS"
 for c in "${concurrencies[@]}"; do
-  prompts=$((10 * c))
+  prompts=$((3 * c))
   ((prompts < 20)) && prompts=20
-  ((prompts > 2000)) && prompts=2000
+  ((prompts > 512)) && prompts=512
   client=(
     "$PYTHON" "$IXBENCH"
     --backend vllm

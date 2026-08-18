@@ -43,10 +43,13 @@ def validate(data: dict) -> None:
     assert len(ids) == len(set(ids))
     for model in data["models"]:
         assert model["model_path"].startswith("/lustre/fs1/")
-        shape = model["moe_shape"]
-        assert model["formula_knee"] == (
-            256 * shape["global_experts"] // shape["top_k"] + 1
-        )
+        if shape := model.get("moe_shape"):
+            assert model["formula_knee"] == (
+                256 * shape["global_experts"] // shape["top_k"] + 1
+            )
+        else:
+            assert model["dense_shape"]
+            assert "formula_knee" not in model
         topology = model["topology"]
         assert topology["dp"] == 1
         assert topology["engine_tp"] == (topology["nodes"] * topology["gpus_per_node"])
@@ -66,7 +69,7 @@ def harness(runtime: dict) -> str:
     return f"{runtime['root']}/{suffix}"
 
 
-def extra_serve(model: dict, variant: str, kv_cache_memory_bytes: int) -> str:
+def extra_serve(model: dict, kv_cache_memory_bytes: int) -> str:
     overrides = model.get("serving_overrides", {})
     tokens = [
         "--max-num-batched-tokens="
@@ -75,8 +78,6 @@ def extra_serve(model: dict, variant: str, kv_cache_memory_bytes: int) -> str:
     ]
     if config := overrides.get("compilation_config"):
         tokens.append(f"--compilation-config={config}")
-    if variant == "native_reference" and model["hybrid_action"] == "per_layer":
-        tokens.append("--moe-backend=marlin")
     return " ".join(tokens)
 
 
@@ -117,7 +118,9 @@ def common_env(
         "VLLM_USE_DEEP_GEMM": "1",
         "VLLM_TEST_FORCE_FP8_MARLIN": "0",
         "VLLM_DISABLED_KERNELS": (
-            "MarlinNvFp4ToFp8LinearKernel" if variant == "native_reference" else ""
+            "MarlinNvFp4ToFp8LinearKernel,NvFp4ByCopyExperts"
+            if variant == "native_reference"
+            else ""
         ),
         "MODEL_PATH": model["model_path"],
         "SERVED": model["repo"],
@@ -132,7 +135,6 @@ def common_env(
         "KV_DTYPE": "fp8",
         "EXTRA_SERVE": extra_serve(
             model,
-            variant,
             data["matrix"]["kv_cache_memory_bytes"],
         ),
     }
@@ -193,7 +195,7 @@ def header(manifest: str) -> list[str]:
         "gap_after() {",
         "  sbatch --parsable --partition=cpu_short --account=sw_aidot "
         "--qos=normal --cpus-per-task=1 --mem=1G --time=00:06:00 "
-        '--dependency="afterany:$1" --job-name="$2-gap" '
+        '--dependency="${3:-afterany}:$1" --job-name="$2-gap" '
         "--wrap='sleep 300'",
         "}",
         "",
@@ -326,7 +328,9 @@ def render_gsm8k(
                     )
                 )
             else:
-                lines.append('gap=$(gap_after "$job" ' + shlex.quote(stem) + ")")
+                lines.append(
+                    'gap=$(gap_after "$job" ' + shlex.quote(stem) + " afterok)"
+                )
                 record_gap(lines, f"{stem}-gap-before")
                 lines.append(
                     sbatch(

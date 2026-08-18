@@ -212,6 +212,8 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.HUMMING,
         NvFp4MoeBackend.EMULATION,
     ]
+    if "NvFp4ByCopyExperts" in envs.VLLM_DISABLED_KERNELS:
+        AVAILABLE_BACKENDS.remove(NvFp4MoeBackend.MARLIN_FP8_BYCOPY)
 
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.B12X,

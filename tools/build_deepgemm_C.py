@@ -11,6 +11,7 @@ Usage: python build_deepgemm_C.py <DEEPGEMM_SRC_DIR> <OUTPUT_DIR> <TARGET_PY>
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +27,26 @@ out = Path(sys.argv[2]).resolve()
 target_py = sys.argv[3]
 vllm_root = Path(__file__).resolve().parent.parent
 out.mkdir(parents=True, exist_ok=True)
+
+patched_csrc = out / "deepgemm-csrc"
+shutil.copytree(src / "csrc", patched_csrc, dirs_exist_ok=True)
+compiler = patched_csrc / "jit" / "compiler.hpp"
+compiler_source = compiler.read_text()
+# NVRTC omits device-runtime declarations that NVCC pre-includes.
+nvrtc_flags = ' --device-int128",'
+assert compiler_source.count(nvrtc_flags) == 1
+compiler_source = compiler_source.replace(
+    nvrtc_flags,
+    ' --device-int128 --pre-include=cuda_device_runtime_api.h",',
+)
+compile_log = '                printf("NVRTC log: %s\\n", compilation_log.c_str());\n'
+compile_log += "            }\n        }\n"
+assert compiler_source.count(compile_log) == 1
+compiler_source = compiler_source.replace(
+    compile_log,
+    compile_log + "        DG_NVRTC_CHECK(compile_result);\n",
+)
+compiler.write_text(compiler_source)
 
 info = json.loads(
     subprocess.check_output(
@@ -48,7 +69,7 @@ includes = [
     f"{cuda_home}/include",
     f"{cuda_home}/include/cccl",
     str(vllm_root / "csrc"),
-    str(src / "csrc"),
+    str(patched_csrc),
     str(src / "deep_gemm/include"),
     str(src / "third-party/cutlass/include"),
     str(src / "third-party/cutlass/tools/util/include"),

@@ -383,6 +383,13 @@ def performance_row(
         "issues": [],
         "artifacts": {},
     }
+    if not directory.is_dir():
+        row["issues"].append(f"missing result directory: {directory}")
+        if not row["submission"]:
+            row["issues"].append("submission manifest lacks expected job label")
+        row["status"] = "missing"
+        row["retry_required"] = True
+        return row, None
     result, result_record, error = json_record(path)
     if result_record:
         row["artifacts"]["result"] = result_record
@@ -652,6 +659,13 @@ def gsm_row(
         "issues": [],
         "artifacts": {},
     }
+    if not directory.is_dir():
+        row["issues"].append(f"missing result directory: {directory}")
+        if not row["submission"]:
+            row["issues"].append("submission manifest lacks expected job label")
+        row["status"] = "missing"
+        row["retry_required"] = True
+        return row, None, None
     summary, summary_record, summary_error = json_record(directory / "summary.json")
     details, details_record, details_error = jsonl_record(directory / "details.jsonl")
     if summary_record:
@@ -1070,6 +1084,29 @@ def self_test() -> None:
         assert jobs["model-adaptive-1k1k"]["job_id"] == "42"
         results = Path(directory) / "results"
         result_dir = performance_directory(results, "model", "adaptive", "1k1k", 1)
+        missing_row, _ = performance_row(
+            results,
+            {"id": "model", "repo": "repo/model", "revision": "rev"},
+            "adaptive",
+            {"id": "1k1k"},
+            1,
+            {},
+        )
+        assert missing_row["status"] == "missing"
+        assert "submission manifest lacks expected job label" in missing_row["issues"]
+        missing_gsm, details, summary = gsm_row(
+            results,
+            {"id": "model", "repo": "repo/model", "revision": "rev"},
+            "adaptive",
+            20,
+            {},
+        )
+        assert (missing_gsm["status"], details, summary) == (
+            "missing",
+            None,
+            None,
+        )
+        assert "submission manifest lacks expected job label" in missing_gsm["issues"]
         result_dir.mkdir(parents=True)
         complete_payload = {
             **payload,

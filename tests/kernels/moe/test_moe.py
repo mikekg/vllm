@@ -1847,6 +1847,24 @@ def test_batched_moe_align_block_size_opcheck():
     )
 
 
+def test_moe_sum_wrapper_dispatches_supported_arity(monkeypatch):
+    from unittest.mock import Mock
+
+    from vllm import _custom_ops as ops
+
+    kernel = Mock()
+    monkeypatch.setattr(torch.ops._moe_C, "moe_sum", kernel)
+    input = torch.empty(1, 2, 3)
+    output = torch.empty(1, 3)
+    topk_ids = torch.empty(1, 2, dtype=torch.int32)
+    expert_map = torch.empty(2, dtype=torch.int32)
+
+    ops.moe_sum(input, output)
+    ops.moe_sum(input, output, topk_ids, expert_map)
+
+    assert [len(call.args) for call in kernel.call_args_list] == [2, 4]
+
+
 # topk=8 covers topk > 4; k=511 covers the non-vectorized scalar path. The
 # layouts exercise contiguous input plus the two non-contiguous cases: a
 # transpose (strided hidden -> scalar gather) and a topk-slice (hidden still

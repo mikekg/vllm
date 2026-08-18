@@ -2388,7 +2388,10 @@ def moe_sum(
     topk_ids: torch.Tensor | None = None,
     expert_map: torch.Tensor | None = None,
 ):
-    torch.ops._moe_C.moe_sum(input, output, topk_ids, expert_map)
+    if topk_ids is None and expert_map is None:
+        torch.ops._moe_C.moe_sum(input, output)
+    else:
+        torch.ops._moe_C.moe_sum(input, output, topk_ids, expert_map)
 
 
 def moe_align_block_size(

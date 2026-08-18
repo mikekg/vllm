@@ -2870,17 +2870,16 @@ path is corrected to `/builder/.benchmark/...`. Without paired per-question
 outcomes, this run is recorded as aggregate evidence rather than a significance
 claim.
 
-### Rejected option: router-aware dense dispatch
+### Model-tree router identification
 
-One possible control is to propagate the `gate=` ownership information from
-`FusedMoEFactory` onto the underlying linear module, then force marked router
-gates to stay on Marlin. This is technically straightforward and avoids model
-or prefix matching, but it is rejected as a production policy: a generic
-linear module owns its inputs, parameters, and local dispatch, not the
-downstream meaning of its output. Encoding router-consumer policy in that
-module would cross the ownership boundary. Keep this only as a benchmark
-control; any production exclusion must be an explicit decision at the model
-or MoE composition layer that owns routing semantics.
+The linear layer cannot identify a router from its own name or shape, but the
+loaded model retains the exact object relationship: `MoERunner.gate` is the
+linear module that produced the logits consumed by that runner. Commit
+`42551d2aaa` uses the common post-load model traversal to set
+`_vllm_is_moe_router=True` on those exact objects after weight finalization and
+before compilation. The dense hybrid checks that static marker and calls its
+embedded Marlin implementation for the router. No model name, module prefix,
+or weight-shape rule is involved.
 
 ## 56. Q3 paired GSM8K and selector-cutoff reruns
 
@@ -2900,7 +2899,8 @@ Against A, B had 16 correct-to-wrong and 15 wrong-to-correct flips, giving an
 exact two-sided McNemar p-value of 1.0. C had 30 regressions and 15
 improvements, p=0.0356978. B therefore matched A in this paired sample; C was
 lower. This separates the MoE-only result from the combined dense-plus-MoE
-result more clearly than job 6644899's aggregate counts.
+result more clearly than job 6644899's aggregate counts. These jobs preceded
+the exact-object router marker in commit `42551d2aaa`.
 
 Job 6645558 then completed B/C at `M_knee=4,608` and `4,096`. The four Slurm
 steps were serialized, and the script retained the five-minute service teardown
@@ -2924,3 +2924,296 @@ without isolating cutoff effects from run-to-run generation variability.
 Artifacts are under `.benchmark/gsm8k-q3-moe-abc-6645286/` and
 `.benchmark/gsm8k-q3-moe-cutoffs-6645558/` in the campaign workspace. Each
 variant has both a summary JSON and a per-question details JSONL.
+
+## 57. Q3 complete runtime-M curve and component attribution
+
+CudaGym run `nvfp4-moe-deepgemm-q3-curve-r13` completed the full Q3 operator
+curve on one H100. The measured object was the complete routed MoE call, not an
+isolated expert GEMM: W13 conversion, activation quantization and routing,
+grouped W13, SiLU and A2 requantization, the same-arena W2 overwrite, grouped
+W2, and unpermute/reduction. W4A16 was measured A/B/A around each hybrid point.
+Each leg retained 15 raw CUDA-event samples; the Marlin median uses the 30
+samples from both A legs. The transient FP8 weight arena was sequential and
+bounded by W13 at 402,653,184 bytes plus 98,304 scale bytes.
+
+For Q3, `E=128`, `top_k=8`, `K=2,048`, and intermediate `N=768`. The total
+number of routed rows is
+
+```text
+R = M * top_k
+mean_rows_per_expert = R / E = M / 16.
+```
+
+The synthetic route was cyclic and balanced, so this mean was also every
+expert's real row count in this particular run. It must not be confused with a
+serving route histogram. When CPU expert counts are unavailable, vLLM sizes
+the DeepGEMM route workspace conservatively as
+
+```text
+C = round_up(R + min(R, E) * (alignment - 1), alignment), alignment=128.
+```
+
+All measured `R` values exceeded `E`, so `C=R+16,256`. The `capacity` columns
+below describe this preallocated worst-case workspace, not actual expert
+imbalance or necessarily executed GEMM rows.
+
+| M | Mean rows / expert | DG capacity rows | Capacity used | Marlin ms | Hybrid ms | Time saved | Throughput-equivalent gain |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 3,072 | 192 | 40,832 | 60.19% | 1.086416 | 1.330176 | -22.44% | -18.33% |
+| 3,584 | 224 | 44,928 | 63.82% | 1.407600 | 1.391040 | +1.18% | +1.19% |
+| 4,080 | 255 | 48,896 | 66.75% | 1.431488 | 1.435808 | -0.30% | -0.30% |
+| 4,096 | 256 | 49,024 | 66.84% | 1.433408 | 1.438112 | -0.33% | -0.33% |
+| 4,112 | 257 | 49,152 | 66.93% | 1.719280 | 1.459936 | +15.08% | +17.76% |
+| 4,352 | 272 | 51,072 | 68.17% | 1.732736 | 1.475808 | +14.83% | +17.41% |
+| 4,608 | 288 | 53,120 | 69.40% | 1.743616 | 1.500832 | +13.92% | +16.18% |
+| 4,864 | 304 | 55,168 | 70.53% | 1.758752 | 1.519520 | +13.60% | +15.74% |
+| 5,120 | 320 | 57,216 | 71.59% | 1.772464 | 1.548256 | +12.65% | +14.48% |
+| 6,144 | 384 | 65,408 | 75.15% | 2.115040 | 1.652928 | +21.85% | +27.96% |
+| 7,168 | 448 | 73,600 | 77.91% | 2.455040 | 1.729984 | +29.53% | +41.91% |
+| 8,192 | 512 | 81,792 | 80.13% | 2.796240 | 1.842176 | +34.12% | +51.79% |
+
+The transition is not a smooth linear crossover. From `M=4,096` to `4,112`,
+hybrid time rises only 1.52%, while Marlin rises 19.94%. The measured sign
+therefore changes sharply at the W4A16 row-tile boundary: 256 rows/expert is a
+practical tie (-0.33%), and 257 rows/expert is a clear hybrid win (+17.76%).
+Bootstrap analysis can resolve a difference near 0.3%, but the operational
+regret from choosing either path at that point is tiny.
+Within the next 128-row bucket the throughput gain declines gradually from
+17.76% to 14.48%, then rises again when Marlin crosses its next tile boundary.
+This is the expected staircase/sawtooth rather than a universal hyperbola.
+
+The first generic boundary suggested by this shape is therefore
+
+```text
+use_fp8 = (M * top_k / E) > 256
+M_boundary = 256 * E / top_k.
+```
+
+For Q3 this gives `M>4,096`. Q36 predicts `M>8,192`, and the completed
+`8,160/8,192/8,224` probes below test the same boundary with different W13/W2
+shapes. Commit `47b1ab3960` implements the integer form
+`floor(256*E/top_k)+1` using global logical `E`. The alternate
+non-inferiority interpretation starts earlier: `M=3,584` is a +1.19% point
+estimate, and the measured mistakes around `M=4,096` cost about 0.3%.
+
+Median component times were:
+
+| M | W13 convert | A1 quant+route | W13 GEMM | SiLU+A2 quant | W2 convert | W2 GEMM | Unpermute+reduce |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 3,072 | 0.468032 | 0.093408 | 0.250080 | 0.062368 | 0.254816 | 0.150176 | 0.056000 |
+| 3,584 | 0.476576 | 0.107552 | 0.272416 | 0.068000 | 0.260256 | 0.161920 | 0.064864 |
+| 4,080 | 0.476448 | 0.118912 | 0.286176 | 0.073408 | 0.260192 | 0.170432 | 0.069472 |
+| 4,096 | 0.476896 | 0.119232 | 0.285792 | 0.073760 | 0.259840 | 0.170336 | 0.069600 |
+| 4,112 | 0.477120 | 0.119968 | 0.300160 | 0.073888 | 0.259712 | 0.178560 | 0.072256 |
+| 4,352 | 0.475648 | 0.124736 | 0.298016 | 0.076032 | 0.259552 | 0.181504 | 0.075648 |
+| 4,608 | 0.475744 | 0.130560 | 0.309632 | 0.079008 | 0.259744 | 0.185152 | 0.078048 |
+| 4,864 | 0.475776 | 0.136384 | 0.312384 | 0.081664 | 0.259712 | 0.190240 | 0.080704 |
+| 5,120 | 0.475552 | 0.143392 | 0.328864 | 0.084288 | 0.259616 | 0.194272 | 0.083424 |
+| 6,144 | 0.475328 | 0.167520 | 0.362720 | 0.095296 | 0.259488 | 0.215456 | 0.096960 |
+| 7,168 | 0.476256 | 0.191328 | 0.368608 | 0.105792 | 0.259744 | 0.238464 | 0.111488 |
+| 8,192 | 0.475648 | 0.214752 | 0.408128 | 0.116416 | 0.260032 | 0.262368 | 0.125600 |
+
+The two weight conversions are almost M-independent at about 0.736 ms
+combined. At small M they dominate the FP8 route; the activation, routing,
+GEMM, and reduction terms grow with M. Component medians were timed as
+individual stages and are not algebraically identical to the median of the
+complete call.
+
+Raw samples and machine-readable rows are in
+`.benchmark/cudagym-nvfp4-moe-deepgemm-r13-20260818/`. The complete plot is
+`q3-full-curve.png` (and an equivalent SVG) in that directory. Its bottom axis
+is actual input M; the top axis is explicitly the balanced mean
+`M*top_k/E`, not an observed serving distribution.
+
+## 58. Q36 direct-DeepGEMM and production-Triton curves
+
+Q36 has global logical `E=256`, `top_k=8`, `K=2,048`, and intermediate
+`N=512`. Its balanced mean reaches 256 and 257 routed rows/expert at
+`M=8,192` and `M=8,224`. Two complete-route A/B/A campaigns measured the
+same M sequence. The direct-DG campaign called staged DeepGEMM directly; the
+production campaign used the staged-Triton implementation and its normal
+configuration selection.
+
+| M | Rows/expert | Marlin ms (DG run) | Direct DG ms | DG gain | Marlin ms (Triton run) | Production Triton ms | Triton gain |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4,096 | 128 | 1.054048 | 1.778816 | -40.744% | 1.114080 | 1.707744 | -34.763% |
+| 5,120 | 160 | 1.509728 | 1.804000 | -16.312% | 1.540320 | 1.896192 | -18.768% |
+| 6,144 | 192 | 1.555632 | 1.881920 | -17.338% | 1.596464 | 1.982272 | -19.463% |
+| 7,168 | 224 | 1.994944 | 1.968096 | +1.364% | 2.025296 | 2.191648 | -7.590% |
+| 8,160 | 255 | 2.037440 | 2.053952 | -0.804% | 2.065488 | 2.264416 | -8.785% |
+| 8,192 | 256 | 2.041632 | 2.056832 | -0.739% | 2.066144 | 2.260608 | -8.602% |
+| 8,224 | 257 | 2.453888 | 2.074112 | +18.310% | 2.470480 | 2.424000 | +1.917% |
+| 9,216 | 288 | 2.492704 | 2.146080 | +16.151% | 2.508880 | 2.481856 | +1.089% |
+| 10,240 | 320 | 2.534848 | 2.230944 | +13.622% | 2.544352 | 2.547328 | -0.117% |
+| 12,288 | 384 | 3.030864 | 2.419008 | +25.294% | 3.036320 | 2.843520 | +6.780% |
+| 14,336 | 448 | 3.522080 | 2.550880 | +38.073% | 3.523632 | 3.133504 | +12.450% |
+| 16,384 | 512 | 4.008336 | 2.754432 | +45.523% | 4.010896 | 3.436736 | +16.707% |
+
+Both campaigns reproduce the Marlin discontinuity between 256 and 257
+rows/expert. The FP8 implementation changes the magnitude: direct DeepGEMM
+moves from -0.739% to +18.310%, while the production staged-Triton path moves
+from -8.602% to +1.917%. The staged-Triton run reported no tuned E256/N512
+H100 FP8 JSON and therefore used vLLM's default MoE configuration. Raw results
+are under `.benchmark/cudagym-nvfp4-moe-q36-curve-r2-20260818/` and
+`.benchmark/cudagym-nvfp4-moe-q36-triton-curve-r2-20260818/`.
+
+## 59. Q3 8k/1k full-hybrid knee ladder and paired GSM8K matrix
+
+Jobs 6646233 through 6646261 ran the Q3 8k/1k workload at powers-of-two
+concurrency on one H100 with fixed 32 GiB KV-cache admission. The W4A16 row
+disabled the dense hybrid and selected Marlin MoE. Each knee row enabled the
+full dense and MoE hybrid with the listed diagnostic MoE threshold. The common
+concurrency order is:
+
+```text
+[1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+```
+
+Exact output-token/s arrays are:
+
+```text
+W4A16 job 6646233:
+[199.300015, 347.278057, 568.426165, 838.895570, 1157.092413,
+ 1508.158562, 1779.984815, 1617.086187, 1594.011694, 1623.589042]
+knee 3072 job 6646239:
+[203.571913, 360.339807, 603.203072, 909.242226, 1341.096388,
+ 1819.519932, 2220.580526, 2009.301421, 1984.932100, 2037.699665]
+knee 3584 job 6646241:
+[203.819969, 360.532472, 599.044728, 916.983085, 1335.026937,
+ 1853.018511, 2244.733880, 2026.334598, 2007.346734, 2055.172602]
+knee 4080 job 6646243:
+[206.232007, 364.215119, 605.318110, 927.790704, 1341.226028,
+ 1851.876648, 2253.426611, 2037.431969, 2005.274704, 2053.644926]
+knee 4096 job 6646245:
+[202.846058, 359.300076, 596.518149, 907.421455, 1322.155851,
+ 1804.333735, 2214.849633, 2002.675603, 1975.261083, 2020.854997]
+knee 4112 job 6646247:
+[202.907348, 358.974351, 598.819935, 920.222982, 1337.762501,
+ 1821.973775, 2231.659113, 2021.225857, 1989.029628, 2057.847477]
+knee 4352 job 6646249:
+[203.580388, 358.187742, 593.031497, 906.620932, 1320.241817,
+ 1801.296555, 2212.888130, 2005.164577, 1971.256078, 2025.325156]
+knee 4608 job 6646251:
+[203.913800, 359.548302, 597.838163, 917.623157, 1323.785976,
+ 1818.241851, 2226.455411, 2009.475529, 1979.803861, 2054.389594]
+knee 4864 job 6646253:
+[204.147117, 359.801743, 600.276320, 917.759684, 1335.393773,
+ 1811.563030, 2228.195648, 2009.717447, 1981.739739, 2034.612285]
+knee 5120 job 6646255:
+[216.712321, 380.353333, 628.424678, 951.631253, 1373.405459,
+ 1848.237521, 2249.728186, 2035.284215, 2008.412823, 2055.366074]
+knee 6144 job 6646257:
+[202.971293, 359.321404, 598.660085, 915.237450, 1334.690906,
+ 1813.909687, 2218.875058, 2004.147631, 1977.776486, 2026.666974]
+knee 7168 job 6646259:
+[203.219264, 359.951061, 596.146654, 912.171815, 1332.255216,
+ 1811.506773, 2215.699972, 2007.223221, 1983.070458, 2031.811945]
+knee 8192 job 6646261:
+[203.283096, 357.422759, 595.950725, 909.918884, 1321.648310,
+ 1812.649306, 2226.080772, 2003.338372, 1979.572618, 2029.452330]
+```
+
+All 130 concurrency points completed with zero nonempty benchmark errors.
+
+The serialized GSM8K matrix uses the same Q3 revision, deterministic decoding,
+1,319 five-shot questions, one common W4A16 baseline, and one full-hybrid
+candidate per MoE knee. The completed points are:
+
+| MoE knee | Variant | Correct / 1,319 | Accuracy | Output tok/s | `n01` | `n10` | Accuracy delta | Exact two-sided McNemar p |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| — | W4A16 baseline | 1,164 | 0.8824867 | 4,236.742 | — | — | — | — |
+| 3,072 | full hybrid | 1,163 | 0.8817286 | 4,100.469 | 22 | 23 | -0.075815 pp | 1.0000000 |
+| 3,584 | full hybrid | 1,158 | 0.8779378 | 4,136.298 | 17 | 23 | -0.454890 pp | 0.4295905 |
+| 4,080 | full hybrid | 1,155 | 0.8756634 | 3,997.598 | 16 | 25 | -0.682335 pp | 0.2110236 |
+| 4,096 | full hybrid | 1,168 | 0.8855193 | 4,016.346762 | 22 | 18 | +0.303260 pp | 0.6358280 |
+| 4,112 | full hybrid | 1,163 | 0.8817286 | 4,075.060913 | 14 | 15 | -0.075815 pp | 1.0000000 |
+| 4,352 | full hybrid | 1,167 | 0.8847612 | 4,155.321188 | 21 | 18 | +0.227445 pp | 0.7492586 |
+| 4,608 | full hybrid | 1,162 | 0.8809704 | 4,051.695302 | 20 | 22 | -0.151630 pp | 0.8776143 |
+| 4,864 | full hybrid | 1,156 | 0.8764215 | 4,017.315449 | 19 | 27 | -0.606520 pp | 0.3019956 |
+| 5,120 | full hybrid | 1,162 | 0.8809704 | 3,959.390619 | 17 | 19 | -0.151630 pp | 0.8679394 |
+| 6,144 | full hybrid | 1,167 | 0.8847612 | 4,066.141670 | 19 | 16 | +0.227445 pp | 0.7358788 |
+| 7,168 | full hybrid | 1,161 | 0.8802123 | 4,048.156943 | 19 | 22 | -0.227445 pp | 0.7552287 |
+| 8,192 | full hybrid | 1,152 | 0.8733889 | 4,123.041416 | 13 | 25 | -0.909780 pp | 0.0729514 |
+
+`n01` counts baseline-wrong/candidate-right pairs and `n10` counts
+baseline-right/candidate-wrong pairs. All 12 candidate comparisons have
+two-sided p-values above 0.05; the closest is knee 8,192 at 0.0729514. They
+used the pre-`42551d2aaa` build in which the dense hybrid could process the
+router gate. Artifacts are under
+`.benchmark/gsm8k-q3-knee-matrix-q3-knees-20260818-r2/`, with both summary JSON
+and per-question JSONL data.
+
+## 60. Router guard and TP/pure-EP implementation
+
+Commit `42551d2aaa` implements semantic router protection in two steps:
+
+1. `_mark_moe_router_gates(model)` walks the loaded model after layer and
+   model weight finalization and marks each exact `MoERunner.gate` object with
+   `_vllm_is_moe_router=True`.
+2. `MarlinNvFp4ToFp8LinearKernel.apply_weights()` checks that static marker and
+   calls its embedded W4A16 Marlin kernel instead of the dense hybrid.
+
+The marker exists before the first compile and changes no weight layout.
+Focused router tests reported 3 passed. The non-checkpoint
+`tests/quantization/test_modelopt.py` run reported 29 passed and 3 deselected.
+The commit's pre-commit hooks passed.
+
+Commit `47b1ab3960` extends the MoE selector and workspace handling:
+
+- the knee uses `num_logical_experts`, so pure-EP ranks use global logical `E`
+  rather than their local tensor's expert count;
+- ordinary TP is supported when EP is off, and pure EP is supported for
+  `TP=1`, `EP>1`;
+- the inner FP8 backend reads runtime `K` from hidden states and concrete `N`
+  from the packed `W13`/`W2` tensors;
+- the DeepGEMM size boundary includes `N=512`;
+- staged Triton clears the second-GEMM output workspace when `expert_map` is
+  present, removing stale values in non-local expert slots.
+
+Configurations with `dp_size>1`, `pcp_size>1`, `sp_size>1`, or EPLB continue
+through the existing backend selection. The focused MoE tests reported 13
+passed and 1 skipped; pre-commit hooks passed. The cases cover global-E knee
+construction under local sharding, TP2 and EP2 selection, DP fallback, runtime
+K/N extraction, the `N=496/512` backend boundary, and clearing remote slots.
+
+## 61. Router-safe Q3 accuracy and Q36 formula ladder
+
+Jobs 6646885, 6646889, and 6646896 repeated the Q3 A/B/C GSM8K comparison
+with the exact-object router guard from `42551d2aaa` and the global-logical-E
+selector from `47b1ab3960`. The selector used the derived Q3 boundary
+`M_knee=4,097`. The retained per-question outcomes give:
+
+| Variant | Job | Correct / 1,319 | Accuracy fraction | Eval s | Output tok/s | `n01` | `n10` | Accuracy delta | Exact two-sided McNemar p |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A: Marlin dense + Marlin MoE | 6646885 | 1,157 | 0.87717968 | 46.2953 | 4,225.395 | -- | -- | -- | -- |
+| B: Marlin dense + hybrid MoE | 6646889 | 1,162 | 0.88097043 | 47.6191 | 4,100.368 | 17 | 12 | +0.379075 pp | 0.4582583 |
+| C: hybrid dense + hybrid MoE | 6646896 | 1,159 | 0.87869598 | 49.4624 | 3,956.847 | 20 | 18 | +0.151630 pp | 0.8714147 |
+
+Here `n01` counts A-wrong/candidate-right pairs and `n10` counts
+A-right/candidate-wrong pairs. Neither hybrid variant shows a statistically
+significant paired accuracy change in this run. Artifacts are under
+`.benchmark/gsm8k-q3-current-formula-current-formula-20260818-r1/`.
+
+Jobs 6646398 through 6646400 completed the Q36 8k/1k A/B/C ladder with the
+derived `M_knee=8,193`. The hybrid route in this series used the production
+staged-Triton FP8 implementation. The common concurrency order is:
+
+```text
+[1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+```
+
+Exact output-token/s arrays are:
+
+```text
+A: Marlin dense + Marlin MoE, job 6646398:
+[220.0432666, 404.0652744, 696.9073713, 1062.8874600, 1510.8721746,
+ 2042.1104185, 2506.7712234, 2914.7652113, 2752.3690089, 2870.5154107]
+B: Marlin dense + hybrid MoE, job 6646399:
+[221.1562262, 432.2056645, 754.0502025, 1145.9857638, 1624.4314987,
+ 2175.5886607, 2692.8749164, 3182.4137426, 3024.7278640, 3155.5385613]
+C: hybrid dense + hybrid MoE, job 6646400:
+[220.6201431, 404.1341633, 702.6082464, 1101.3417264, 1582.8796484,
+ 2158.6717285, 2704.2783047, 3222.0570617, 3050.9239561, 3199.3768603]
+```
+
+All 30 Q36 concurrency points completed with zero nonempty benchmark errors.

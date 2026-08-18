@@ -26,7 +26,8 @@ different problem.
 For one MoE layer invocation:
 
 - `M`: tokens entering the router.
-- `E`: number of experts represented by the local expert tensors.
+- `E`: global logical expert count before expert parallel sharding.
+- `E_local`: experts represented by the tensors on one rank.
 - `T`: selected experts per token (`top_k`).
 - `K`: input hidden dimension.
 - `N`: one expert's intermediate dimension.
@@ -51,6 +52,10 @@ and
 For a perfectly balanced controlled workload, every expert receives
 `r_i = r_bar`. Real serving is not balanced, so `r_bar` alone does not
 describe the grouped GEMM cost.
+
+The knee mapping uses global logical `E`, including under expert parallelism.
+The backend still operates on the rank-local expert stack, so `E_local` and
+the concrete tensor dimensions determine the work and workspace on that rank.
 
 If all `MT` routes were sampled independently and uniformly, the expected
 number of experts receiving at least one route would be
@@ -116,40 +121,31 @@ In Q3, the router gate is an ordinary quantized `ReplicatedLinear`, rather than
 a distinct `GateLinear` type. A dense layer cannot infer from its own input and
 weight shapes that its output will later feed a router.
 
-The model tree does retain the semantic relationship. `FusedMoEFactory`
-passes the actual gate module into `MoERunner`, and `MoERunner` stores that
-object as `runner.gate`. A model-level traversal can therefore identify the
-exact gate objects by identity:
+The model tree retains the semantic relationship. `FusedMoEFactory` passes
+the actual gate module into `MoERunner`, and `MoERunner` stores that object as
+`runner.gate`. Commit `42551d2aaa` added `_mark_moe_router_gates(model)` to the
+common post-load path. After per-layer and model-level weight finalization, it
+walks `model.modules()` and marks each non-null `MoERunner.gate` object:
 
 ```python
-router_gates = {
-    id(runner.gate): runner.gate
-    for runner in model.modules()
-    if isinstance(runner, MoERunner) and runner.gate is not None
-}
+for module in model.modules():
+    if isinstance(module, MoERunner) and module.gate is not None:
+        module.gate._vllm_is_moe_router = True
 ```
 
-A static attribute such as `routed_gate` can be set after weight finalization
-and before the first compilation. The dense selector can then remain local:
+`MarlinNvFp4ToFp8LinearKernel.apply_weights()` reads that static marker before
+entering the dense hybrid operation:
 
 ```python
-if not getattr(layer, "routed_gate", False) and M >= knee_m:
-    return fp8_path(...)
-return marlin_path(...)
+if getattr(layer, "_vllm_is_moe_router", False):
+    return marlin.apply_weights(layer, x, bias)
+return hybrid_path(...)
 ```
 
-Dynamo specializes the static attribute, while `M` remains the runtime
-quantity. `model.process_weights_after_loading()` runs late enough for this
-attribute update because the update does not alter the packed weight layout
-and compilation occurs afterward.
-
-There is currently no generic public registration point that installs such a
-pre-compilation model-tree processor across all built-in models. Directly
-changing `MoERunner` to mark its gate would provide the information, but it
-would make the expert implementation responsible for policy in a separate
-linear module. That option is recorded rather than used by the current
-prototype. Name matching, prefix matching, and shape matching are weaker
-alternatives because ordinary dense projections can satisfy the same tests.
+The traversal runs before the first compilation, so Dynamo can specialize the
+marker while ordinary dense layers retain their runtime-M choice. It does not
+change the packed weights. It also avoids name, prefix, and shape matching:
+the exact module object already held by the runner is the identity source.
 
 ## Resident and transient representations
 
@@ -323,8 +319,8 @@ M_{\text{knee}}
 = 4r_{\text{knee}}.
 \]
 
-A provisional per-expert interval of 256–320 rows would map to an input-M
-interval of 1024–1280 in that otherwise identical case.
+The measured boundary is the first value above 256 rows/expert. In that
+otherwise identical case it maps to `floor(256*16/4)+1 = 1025`.
 
 The cancellation of `K*N` is only an operation-count intuition. It is not a
 production crossover law. Measured conversion and GEMM times depend
@@ -363,9 +359,8 @@ T_{\text{route},4} \\
     G_{4,13}(r_i,K,2N)
     + G_{4,2}(r_i,N,K)
   \right] \\
-&+ T_{\text{activation},4}
-
-- T_{\text{reduce},4}.
+&+ T_{\text{activation},4} \\
+&+ T_{\text{reduce},4}.
 \end{aligned}
 \]
 
@@ -374,11 +369,10 @@ The transient FP8 route can be represented as
 \[
 \begin{aligned}
 T_8(\{r_i\}) ={}&
-C_{13}(E,K,2N)
-
-- C_2(E,N,K) \\
-&+ T_{\text{A1 quant}}
-- T_{\text{permute}} \\
+C_{13}(E,K,2N) \\
+&+ C_2(E,N,K) \\
+&+ T_{\text{A1 quant}} \\
+&+ T_{\text{permute}} \\
 &+ \sum_i
   G_{8,13}(p_i,K,2N) \\
 &+ T_{\text{SiLU+A2 requant}} \\
@@ -403,61 +397,51 @@ actual tradeoff visible: conversion is paid for every selected high-path
 invocation across the full expert stack, while the useful GEMM work is set by
 the routed rows.
 
-## DeepGEMM row rounding
+## DeepGEMM row rounding and route capacity
 
-DeepGEMM aligns each expert's routed row count independently:
+DeepGEMM aligns each expert's real routed count independently:
 
 \[
 p_i = A\left\lceil\frac{r_i}{A}\right\rceil,
+\qquad P = \sum_i p_i,
 \qquad A = 128.
 \]
 
-The total padded work is
+The executed padding efficiency is `R/P`, where `R=sum_i(r_i)`. Two calls with
+the same `M`, `E`, and `T` can therefore have different FP8 costs when their
+expert distributions differ.
+
+The Q3 r13 harness reported a different quantity: the conservative route
+workspace capacity used when CPU expert counts are unavailable:
 
 \[
-P = \sum_i p_i.
+C = \operatorname{round\_up}
+\left(R + \min(R,E)(A-1), A\right).
 \]
 
-A useful routing-efficiency statistic is
+All Q3 points had `R=M*T>E`, so `C=R+16,256`. The resulting capacity values
+are not actual padded GEMM rows and must not be used as a serving histogram.
 
-\[
-\eta = \frac{R}{P}
-= \frac{\sum_i r_i}
-       {\sum_i 128\lceil r_i/128\rceil}.
-\]
+| Input `M` | Balanced mean rows/expert | Real routes `R` | Workspace capacity `C` | `R/C` |
+|---:|---:|---:|---:|---:|
+| 3,072 | 192 | 24,576 | 40,832 | 60.19% |
+| 3,584 | 224 | 28,672 | 44,928 | 63.82% |
+| 4,080 | 255 | 32,640 | 48,896 | 66.75% |
+| 4,096 | 256 | 32,768 | 49,024 | 66.84% |
+| 4,112 | 257 | 32,896 | 49,152 | 66.93% |
+| 4,352 | 272 | 34,816 | 51,072 | 68.17% |
+| 4,608 | 288 | 36,864 | 53,120 | 69.40% |
+| 4,864 | 304 | 38,912 | 55,168 | 70.53% |
+| 5,120 | 320 | 40,960 | 57,216 | 71.59% |
+| 6,144 | 384 | 49,152 | 65,408 | 75.15% |
+| 7,168 | 448 | 57,344 | 73,600 | 77.91% |
+| 8,192 | 512 | 65,536 | 81,792 | 80.13% |
 
-Two batches with identical `M`, `E`, and `T` can therefore have different FP8
-costs. A concentrated routing distribution can use fewer aligned groups than a
-uniform distribution, while a distribution that leaves many experts barely
-nonempty can incur more padding.
-
-For the balanced Q3 harness, the exact alignment points are:
-
-| Input `M` | Real rows/expert `r` | Padded rows/expert `p` | Total real routes `R` | Total padded rows `P` | Efficiency `η` |
-|---:|---:|---:|---:|---:|---:|
-| 4096 | 256 | 256 | 32,768 | 32,768 | 100.000% |
-| 5120 | 320 | 384 | 40,960 | 49,152 | 83.333% |
-| 6144 | 384 | 384 | 49,152 | 49,152 | 100.000% |
-| 7168 | 448 | 512 | 57,344 | 65,536 | 87.500% |
-| 8192 | 512 | 512 | 65,536 | 65,536 | 100.000% |
-
-The alignment creates a staircase in the FP8 cost. A particularly useful
-boundary probe is:
-
-| Input `M` | Real rows/expert | Padded rows/expert |
-|---:|---:|---:|
-| 4080 | 255 | 256 |
-| 4096 | 256 | 256 |
-| 4112 | 257 | 384 |
-
-Moving from `M=4096` to `M=4112` adds only one real row per expert, but changes
-the aligned capacity from 256 to 384 rows per expert, a 50% increase. This is a
-possible performance cliff and is more informative than another point far
-inside an alignment bucket.
-
-The existing coarse plot labels its horizontal axis as “real routed rows per
-expert.” For the controlled curve, those values are the deliberately balanced
-mean `M*T/E`; they are not a measured production routing distribution.
+The cyclic synthetic route makes `M*T/E` the real count for every expert in
+this controlled run. Production needs its actual per-expert counts to derive
+`P`, padding efficiency, and min/median/max residency. The sharp measured
+256-to-257 transition below comes from the W4A16 Marlin row-tile boundary; it
+is not evidence that the conservative capacity `C` was executed.
 
 ## Q3 controlled complete-route measurements
 
@@ -472,138 +456,122 @@ The controlled benchmark times the complete route:
 - grouped `W2`;
 - weighted unpermute/reduction.
 
-The measured coarse points are:
+Run `nvfp4-moe-deepgemm-q3-curve-r13` retained 15 raw CUDA-event samples for
+the hybrid leg and each surrounding Marlin leg. The Marlin median uses all 30
+A samples. These are the authoritative sequential-arena results:
 
-| Input `M` | Real rows/expert | Padded rows/expert | Marlin route | Hybrid route | Time saved | Throughput change |
+| Input `M` | Mean rows/expert | Marlin ms | Hybrid ms | Time saved | Throughput-equivalent gain |
 |---:|---:|---:|---:|---:|---:|
-| 4096 | 256 | 256 | 1.408080 ms | 1.417888 ms | -0.697% | -0.692% |
-| 5120 | 320 | 384 | 1.764000 ms | 1.545632 ms | +12.379% | +14.128% |
-| 6144 | 384 | 384 | 2.112944 ms | 1.655072 ms | +21.670% | +27.665% |
-| 7168 | 448 | 512 | 2.442800 ms | 1.736320 ms | +28.921% | +40.688% |
-| 8192 | 512 | 512 | 2.766864 ms | 1.824064 ms | +34.075% | +51.687% |
+| 3,072 | 192 | 1.086416 | 1.330176 | -22.44% | -18.33% |
+| 3,584 | 224 | 1.407600 | 1.391040 | +1.18% | +1.19% |
+| 4,080 | 255 | 1.431488 | 1.435808 | -0.30% | -0.30% |
+| 4,096 | 256 | 1.433408 | 1.438112 | -0.33% | -0.33% |
+| 4,112 | 257 | 1.719280 | 1.459936 | +15.08% | +17.76% |
+| 4,352 | 272 | 1.732736 | 1.475808 | +14.83% | +17.41% |
+| 4,608 | 288 | 1.743616 | 1.500832 | +13.92% | +16.18% |
+| 4,864 | 304 | 1.758752 | 1.519520 | +13.60% | +15.74% |
+| 5,120 | 320 | 1.772464 | 1.548256 | +12.65% | +14.48% |
+| 6,144 | 384 | 2.115040 | 1.652928 | +21.85% | +27.96% |
+| 7,168 | 448 | 2.455040 | 1.729984 | +29.53% | +41.91% |
+| 8,192 | 512 | 2.796240 | 1.842176 | +34.12% | +51.79% |
 
-Only complete-route totals were retained for these coarse points. The harness
-did not emit per-stage timings, so no conversion, quantization, permutation,
-GEMM, activation, or reduction split is inferred from this table.
+The curve is a staircase, not the earlier interpolated hyperbola. From 256 to
+257 rows/expert, hybrid latency rises 1.52% while Marlin rises 19.94%; the
+throughput-equivalent result moves from a practical tie to +17.76%. The gain
+then declines within the Marlin tile bucket and rises at its next boundary.
 
-The `M=4096` point came from the older simultaneous-memory harness. It remains
-useful as a near-equality observation, but the exact value can move under the
-sequential arena implementation.
+Median component times were:
 
-The first coarse sample exceeding 20% throughput was `M=6144`. Treating that
-as the selector knee would discard the measured 14.128% gain at `M=5120`.
-The 20–40% figure is a model-level project outcome, not a reason to reject a
-positive layer-level saving.
+| M | W13 convert | A1 quant+route | W13 GEMM | SiLU+A2 quant | W2 convert | W2 GEMM | Unpermute+reduce |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 3,072 | 0.468032 | 0.093408 | 0.250080 | 0.062368 | 0.254816 | 0.150176 | 0.056000 |
+| 3,584 | 0.476576 | 0.107552 | 0.272416 | 0.068000 | 0.260256 | 0.161920 | 0.064864 |
+| 4,080 | 0.476448 | 0.118912 | 0.286176 | 0.073408 | 0.260192 | 0.170432 | 0.069472 |
+| 4,096 | 0.476896 | 0.119232 | 0.285792 | 0.073760 | 0.259840 | 0.170336 | 0.069600 |
+| 4,112 | 0.477120 | 0.119968 | 0.300160 | 0.073888 | 0.259712 | 0.178560 | 0.072256 |
+| 4,352 | 0.475648 | 0.124736 | 0.298016 | 0.076032 | 0.259552 | 0.181504 | 0.075648 |
+| 4,608 | 0.475744 | 0.130560 | 0.309632 | 0.079008 | 0.259744 | 0.185152 | 0.078048 |
+| 4,864 | 0.475776 | 0.136384 | 0.312384 | 0.081664 | 0.259712 | 0.190240 | 0.080704 |
+| 5,120 | 0.475552 | 0.143392 | 0.328864 | 0.084288 | 0.259616 | 0.194272 | 0.083424 |
+| 6,144 | 0.475328 | 0.167520 | 0.362720 | 0.095296 | 0.259488 | 0.215456 | 0.096960 |
+| 7,168 | 0.476256 | 0.191328 | 0.368608 | 0.105792 | 0.259744 | 0.238464 | 0.111488 |
+| 8,192 | 0.475648 | 0.214752 | 0.408128 | 0.116416 | 0.260032 | 0.262368 | 0.125600 |
 
-For this Q3 shape, the observed crossover is bracketed by:
+The two conversions remain nearly constant at about 0.736 ms combined. The
+activation, routing, GEMM, and reduction terms grow with M. Component medians
+are independent stage measurements and do not algebraically sum to the median
+complete call. Raw rows and plots are under
+`.benchmark/cudagym-nvfp4-moe-deepgemm-r13-20260818/`.
 
-- 256 real rows/expert: approximately equal;
-- 320 real rows/expert: a clear 14.128% throughput improvement.
+## Q36 backend comparison
 
-The corresponding input-M bracket is:
+Q36 has `E=256`, `T=8`, `K=2048`, and `N=512`, so 256 and 257 mean routed
+rows/expert occur at `M=8192` and `M=8224`. Two matched A/B/A curves measured
+the complete route: one invoked staged DeepGEMM directly, while the other used
+the production staged-Triton implementation and its normal config selection.
 
-\[
-256 \cdot \frac{128}{8} = 4096
-\]
+| M | Rows/expert | Marlin ms (DG run) | Direct DG ms | DG gain | Marlin ms (Triton run) | Production Triton ms | Triton gain |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4,096 | 128 | 1.054048 | 1.778816 | -40.74% | 1.114080 | 1.707744 | -34.76% |
+| 5,120 | 160 | 1.509728 | 1.804000 | -16.31% | 1.540320 | 1.896192 | -18.77% |
+| 6,144 | 192 | 1.555632 | 1.881920 | -17.34% | 1.596464 | 1.982272 | -19.46% |
+| 7,168 | 224 | 1.994944 | 1.968096 | +1.36% | 2.025296 | 2.191648 | -7.59% |
+| 8,160 | 255 | 2.037440 | 2.053952 | -0.80% | 2.065488 | 2.264416 | -8.78% |
+| 8,192 | 256 | 2.041632 | 2.056832 | -0.74% | 2.066144 | 2.260608 | -8.60% |
+| 8,224 | 257 | 2.453888 | 2.074112 | +18.31% | 2.470480 | 2.424000 | +1.92% |
+| 9,216 | 288 | 2.492704 | 2.146080 | +16.15% | 2.508880 | 2.481856 | +1.09% |
+| 10,240 | 320 | 2.534848 | 2.230944 | +13.62% | 2.544352 | 2.547328 | -0.12% |
+| 12,288 | 384 | 3.030864 | 2.419008 | +25.29% | 3.036320 | 2.843520 | +6.78% |
+| 14,336 | 448 | 3.522080 | 2.550880 | +38.07% | 3.523632 | 3.133504 | +12.45% |
+| 16,384 | 512 | 4.008336 | 2.754432 | +45.52% | 4.010896 | 3.436736 | +16.71% |
 
-to
+Both alternatives expose the same 256-to-257 discontinuity because Marlin,
+not the FP8 backends, jumps at that row-tile boundary. Direct DeepGEMM moves
+from -0.74% to +18.31%; staged Triton moves from -8.60% to +1.92%. The Triton
+run also logged that the tuned E256/N512 H100 FP8 JSON was absent, so its normal
+selector used vLLM's default MoE config. Raw results are under
+`.benchmark/cudagym-nvfp4-moe-q36-curve-r2-20260818/` and
+`.benchmark/cudagym-nvfp4-moe-q36-triton-curve-r2-20260818/`.
 
-\[
-320 \cdot \frac{128}{8} = 5120.
-\]
+## Runtime selector
 
-Splitting that interval gives:
-
-\[
-r_{\text{mid}} = \frac{256 + 320}{2} = 288
-\]
-
-and
-
-\[
-M_{\text{mid}}
-= 288 \cdot \frac{128}{8}
-= 4608.
-\]
-
-Within the aligned-384 bucket, linear extrapolation below the measured 5120 and
-6144 times gives the provisional `M=4608` estimate:
-
-- Marlin: approximately 1.590 ms;
-- hybrid: approximately 1.491 ms;
-- time reduction: approximately 6.2%;
-- throughput increase: approximately 6.6%.
-
-Those are estimates, not measurements.
-
-Within one fixed alignment and kernel-tile bucket, a useful local
-approximation is:
-
-\[
-T_{\text{Marlin}}(M) \approx a + bM
-\]
-
-and
-
-\[
-T_{\text{hybrid}}(M) \approx C + c + dM,
-\]
-
-where `C` represents conversion and other fixed high-path work. The throughput
-ratio
-
-\[
-\frac{T_{\text{Marlin}}(M)}
-     {T_{\text{hybrid}}(M)} - 1
-\]
-
-is fractional-linear, or hyperbola-like, rather than linear. Crossing an
-alignment boundary changes the coefficients abruptly, producing the observed
-staircase or sawtooth around the smooth trend.
-
-The fine-curve probe set is:
-
-```text
-3072, 3584, 4080, 4096, 4112, 4352,
-4608, 4864, 5120, 6144, 7168, 8192
-```
-
-It covers points below the observed crossover, both sides of the 256-row
-DeepGEMM boundary, the midpoint estimate, and the existing coarse upper
-points.
-
-## Selector interpretations
-
-There are two useful ways to interpret the Q3 boundary.
-
-### Positive-gain selector
-
-The selector changes paths at the lowest repeatable point where
+The Q3 and Q36 cliffs agree on the first input M whose mean routed residency
+exceeds 256 rows/expert:
 
 \[
-T_8 < T_4.
+M_{\text{knee}}
+= \left\lfloor 256\frac{E}{T}\right\rfloor + 1.
 \]
 
-This collects every measurable local saving, including a 5–15% improvement
-that contributes toward the model-level result.
+The outer hybrid uses the concrete, post-dispatch `M` on every invocation and
+selects FP8 when `M >= M_knee`; Q3 therefore uses 4097 and Q36 uses 8193. This
+rule depends on global logical expert count and top-k, not a model name or a
+fitted layer identity. A mistake at the adjacent 256-row point has little
+practical regret: the Q3 difference is about 0.3%, even when enough samples
+resolve it.
 
-The `M=5120` point is already a clear positive-gain observation. The exact
-lower boundary depends on the fine probes around 4096–5120.
+After the outer M decision, the FP8 implementation is selected from the actual
+local `K` and `N`, activation, and available backend. SILU shapes with
+DeepGEMM support, `N >= 512`, and valid `(M,2N,K)` and `(M,K,N)` contracts use
+DeepGEMM; other supported shapes use staged Triton. Thus the knee is generic,
+while K/N tiling and backend capability remain explicit per-layer constraints.
 
-### Non-inferiority selector
+Commit `47b1ab3960` made those quantities concrete in parallel execution:
 
-Near a measured tie, choosing either path has negligible regret. This allows a
-selector near `M=4096` if repeated measurements show that both paths remain
-within run-to-run noise there.
+- `_moe_shape()` reads `num_logical_experts`, rather than the rank-local expert
+  count, when constructing the knee;
+- the inner backend selector derives `N` from the packed `W13`/`W2` tensors and
+  `K` from the runtime hidden states;
+- ordinary tensor parallel execution is accepted when expert parallelism is
+  off, and pure expert parallel execution is accepted when `TP=1` and `EP>1`;
+- configurations with `dp_size>1`, `pcp_size>1`, `sp_size>1`, or EPLB continue
+  through the existing backend selection instead of this hybrid;
+- when pure EP supplies an `expert_map`, staged Triton clears its second-GEMM
+  output workspace before use so non-local expert slots cannot retain data
+  from an earlier invocation.
 
-This criterion is distinct from claiming a 20% local improvement. Its value is
-that a small selector error near equal runtime has little end-to-end cost,
-while moving the selector too high discards real gains.
-
-The current lookup remains fail-closed: `_lookup_moe_m_knee` returns no hybrid
-selection for an unknown shape unless a benchmark override or calibrated entry
-exists. The controlled Q3 curve supplies evidence for one shape, not a
-model-name hardcode.
+The commit also changed the DeepGEMM intermediate-size boundary from `N>512`
+to `N>=512`, which admits the measured Q36 shape.
 
 ## Actual-model throughput
 
@@ -643,6 +611,66 @@ Job 6645558 later completed the B/C GSM8K evaluations at cutoffs 4608 and
 accuracy and evaluation-runtime results appear below; they are not replacement
 8k/1k serving-throughput measurements.
 
+### Q3, 8k/1k concurrency and knee matrix
+
+The complete serving matrix used one H100, fixed 32 GiB KV-cache admission,
+8,192 input tokens and 1,024 output tokens per request. The baseline disabled
+the dense hybrid and selected Marlin MoE. Every knee row enabled the full dense
+and MoE hybrid with that diagnostic MoE threshold. Concurrency order is:
+
+```text
+[1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+```
+
+The exact output-token/s arrays are:
+
+```text
+W4A16 job 6646233:
+[199.300015, 347.278057, 568.426165, 838.895570, 1157.092413,
+ 1508.158562, 1779.984815, 1617.086187, 1594.011694, 1623.589042]
+knee 3072 job 6646239:
+[203.571913, 360.339807, 603.203072, 909.242226, 1341.096388,
+ 1819.519932, 2220.580526, 2009.301421, 1984.932100, 2037.699665]
+knee 3584 job 6646241:
+[203.819969, 360.532472, 599.044728, 916.983085, 1335.026937,
+ 1853.018511, 2244.733880, 2026.334598, 2007.346734, 2055.172602]
+knee 4080 job 6646243:
+[206.232007, 364.215119, 605.318110, 927.790704, 1341.226028,
+ 1851.876648, 2253.426611, 2037.431969, 2005.274704, 2053.644926]
+knee 4096 job 6646245:
+[202.846058, 359.300076, 596.518149, 907.421455, 1322.155851,
+ 1804.333735, 2214.849633, 2002.675603, 1975.261083, 2020.854997]
+knee 4112 job 6646247:
+[202.907348, 358.974351, 598.819935, 920.222982, 1337.762501,
+ 1821.973775, 2231.659113, 2021.225857, 1989.029628, 2057.847477]
+knee 4352 job 6646249:
+[203.580388, 358.187742, 593.031497, 906.620932, 1320.241817,
+ 1801.296555, 2212.888130, 2005.164577, 1971.256078, 2025.325156]
+knee 4608 job 6646251:
+[203.913800, 359.548302, 597.838163, 917.623157, 1323.785976,
+ 1818.241851, 2226.455411, 2009.475529, 1979.803861, 2054.389594]
+knee 4864 job 6646253:
+[204.147117, 359.801743, 600.276320, 917.759684, 1335.393773,
+ 1811.563030, 2228.195648, 2009.717447, 1981.739739, 2034.612285]
+knee 5120 job 6646255:
+[216.712321, 380.353333, 628.424678, 951.631253, 1373.405459,
+ 1848.237521, 2249.728186, 2035.284215, 2008.412823, 2055.366074]
+knee 6144 job 6646257:
+[202.971293, 359.321404, 598.660085, 915.237450, 1334.690906,
+ 1813.909687, 2218.875058, 2004.147631, 1977.776486, 2026.666974]
+knee 7168 job 6646259:
+[203.219264, 359.951061, 596.146654, 912.171815, 1332.255216,
+ 1811.506773, 2215.699972, 2007.223221, 1983.070458, 2031.811945]
+knee 8192 job 6646261:
+[203.283096, 357.422759, 595.950725, 909.918884, 1321.648310,
+ 1812.649306, 2226.080772, 2003.338372, 1979.572618, 2029.452330]
+```
+
+All 130 concurrency points completed with zero nonempty benchmark errors. The
+matrix records the whole-model response to a knee, while the controlled curves
+above measure one MoE operation at a specified runtime M; they are related but
+not interchangeable measurements.
+
 ### Q36M, 8k/1k
 
 All three Q36M runs used:
@@ -663,6 +691,32 @@ not record the exact per-layer route vector, padded-row count, or branch count,
 so the lower Q36M improvement cannot yet be assigned to one routing or
 alignment feature. Their diagnostic knee was 5120.
 
+### Q36M, derived-knee concurrency ladder
+
+Jobs 6646398 through 6646400 used the derived `M_knee=8193` and completed the
+8k/1k powers-of-two ladder. The hybrid route in this series used the production
+staged-Triton FP8 implementation. Concurrency order is:
+
+```text
+[1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+```
+
+Exact output-token/s arrays are:
+
+```text
+A: Marlin dense + Marlin MoE, job 6646398:
+[220.0432666, 404.0652744, 696.9073713, 1062.8874600, 1510.8721746,
+ 2042.1104185, 2506.7712234, 2914.7652113, 2752.3690089, 2870.5154107]
+B: Marlin dense + hybrid MoE, job 6646399:
+[221.1562262, 432.2056645, 754.0502025, 1145.9857638, 1624.4314987,
+ 2175.5886607, 2692.8749164, 3182.4137426, 3024.7278640, 3155.5385613]
+C: hybrid dense + hybrid MoE, job 6646400:
+[220.6201431, 404.1341633, 702.6082464, 1101.3417264, 1582.8796484,
+ 2158.6717285, 2704.2783047, 3222.0570617, 3050.9239561, 3199.3768603]
+```
+
+All 30 concurrency points completed with zero nonempty benchmark errors.
+
 ## Accuracy evidence
 
 Paired job 6645286 used the Q3 A/B/C split, diagnostic `m_knee=6144`, and
@@ -679,10 +733,10 @@ symmetric. The combined C result is lower and its paired asymmetry is
 statistically visible in this sample.
 
 Because B changes only the expert path while C also changes dense layers, the
-current evidence points away from the MoE conversion itself as the source of
-the C regression. The router gate is one specific dense layer requiring
-separate treatment because small changes in its logits can alter discrete
-top-k choices.
+result points away from the MoE conversion itself as the source of the C
+regression. These runs preceded commit `42551d2aaa`; the exact-object marker
+described above now keeps the router gate on Marlin because small changes in
+its logits can alter discrete top-k choices.
 
 Job 6645558 completed the 4608 and 4096 B/C reruns. The same 1,319 prompts and
 the A details from job 6645286 give the following paired results:
@@ -712,6 +766,47 @@ comparison. The paired correctness result changes with the cutoff: B at 6144
 was neutral, B at 4608 was lower in this sample, and B at 4096 was neutral.
 Each cutoff changes which invocations use the hybrid path, but these serial
 runs do not separate that effect from run-to-run generation variability.
+
+The later serialized full-hybrid knee matrix uses one common W4A16 baseline
+and retains per-question details for every candidate. These are the completed
+points so far:
+
+| MoE knee | Variant | Correct / 1,319 | Accuracy | Output tok/s | `n01` improvements | `n10` regressions | Accuracy delta | Exact McNemar p |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| — | W4A16 baseline | 1,164 | 0.8824867 | 4,236.742 | — | — | — | — |
+| 3,072 | full hybrid | 1,163 | 0.8817286 | 4,100.469 | 22 | 23 | -0.075815 pp | 1.0000000 |
+| 3,584 | full hybrid | 1,158 | 0.8779378 | 4,136.298 | 17 | 23 | -0.454890 pp | 0.4295905 |
+| 4,080 | full hybrid | 1,155 | 0.8756634 | 3,997.598 | 16 | 25 | -0.682335 pp | 0.2110236 |
+| 4,096 | full hybrid | 1,168 | 0.8855193 | 4,016.346762 | 22 | 18 | +0.303260 pp | 0.6358280 |
+| 4,112 | full hybrid | 1,163 | 0.8817286 | 4,075.060913 | 14 | 15 | -0.075815 pp | 1.0000000 |
+| 4,352 | full hybrid | 1,167 | 0.8847612 | 4,155.321188 | 21 | 18 | +0.227445 pp | 0.7492586 |
+| 4,608 | full hybrid | 1,162 | 0.8809704 | 4,051.695302 | 20 | 22 | -0.151630 pp | 0.8776143 |
+| 4,864 | full hybrid | 1,156 | 0.8764215 | 4,017.315449 | 19 | 27 | -0.606520 pp | 0.3019956 |
+| 5,120 | full hybrid | 1,162 | 0.8809704 | 3,959.390619 | 17 | 19 | -0.151630 pp | 0.8679394 |
+| 6,144 | full hybrid | 1,167 | 0.8847612 | 4,066.141670 | 19 | 16 | +0.227445 pp | 0.7358788 |
+| 7,168 | full hybrid | 1,161 | 0.8802123 | 4,048.156943 | 19 | 22 | -0.227445 pp | 0.7552287 |
+| 8,192 | full hybrid | 1,152 | 0.8733889 | 4,123.041416 | 13 | 25 | -0.909780 pp | 0.0729514 |
+
+Here `n01` means baseline wrong and candidate right; `n10` means baseline
+right and candidate wrong. All 12 candidate comparisons have two-sided paired
+p-values above 0.05; knee 8192 is closest at 0.0729514. These candidates were
+built before commit `42551d2aaa`, so their dense hybrid could still process the
+router gate. They record that earlier execution path; router-guard measurements
+use the same paired format as a separate comparison. Artifacts are under
+`.benchmark/gsm8k-q3-knee-matrix-q3-knees-20260818-r2/`.
+
+The post-router-guard A/B/C repetition used the derived `M_knee=4097` and
+included both `42551d2aaa` and `47b1ab3960`:
+
+| Variant | Job | Correct / 1,319 | Accuracy fraction | Eval s | Output tok/s | `n01` improvements | `n10` regressions | Accuracy delta | Exact McNemar p |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A: Marlin dense + Marlin MoE | 6646885 | 1,157 | 0.87717968 | 46.2953 | 4,225.395 | -- | -- | -- | -- |
+| B: Marlin dense + hybrid MoE | 6646889 | 1,162 | 0.88097043 | 47.6191 | 4,100.368 | 17 | 12 | +0.379075 pp | 0.4582583 |
+| C: hybrid dense + hybrid MoE | 6646896 | 1,159 | 0.87869598 | 49.4624 | 3,956.847 | 20 | 18 | +0.151630 pp | 0.8714147 |
+
+Neither hybrid variant has a statistically significant paired accuracy change
+against A in this repetition. Artifacts are under
+`.benchmark/gsm8k-q3-current-formula-current-formula-20260818-r1/`.
 
 ## Production routing data
 
@@ -747,31 +842,30 @@ balanced curve and actual serving distributions without presenting
 ## Model-independent shape handling
 
 Most fused expert stacks are symmetric within a layer because grouped GEMM
-expects one common expert tensor shape. The relevant dimensions are the actual
-local tensors after tensor parallelism or expert parallelism, not only the
-global model configuration.
+expects one common expert tensor shape. The knee uses the global logical expert
+count and top-k. Backend capability and workspace use the concrete rank-local
+weight shapes after tensor or expert parallel partitioning.
 
 The initial validation inventory includes:
 
-| Model shape | Experts `E` | Top-k `T` | Hidden `K` | Intermediate `N` | Parallel note |
+| Model shape | Global logical experts `E` | Top-k `T` | Hidden `K` | Intermediate `N` | Parallel note |
 |---|---:|---:|---:|---:|---|
 | Q3 | 128 | 8 | 2048 | 768 | measured |
 | Q36M | 256 | 8 | 2048 | 512 | actual-model A/B/C measured |
 | Gemma 4 candidate | 128 | 8 | 2816 | 704 | TP4 local `N=176` |
 | Nemotron Nano candidate | 128 | 6 | 2688 | 1856 | TP2 local `N=928` |
 
-The Q3 per-expert crossover can provide an initial estimate for another shape:
+The runtime selector transfers the measured row boundary to another shape:
 
 \[
-M_{\text{estimate}}
-= r_{\text{Q3}}\frac{E}{T}.
+M_{\text{knee}}
+= \left\lfloor 256\frac{E}{T}\right\rfloor + 1.
 \]
 
-The estimate is then checked against the actual local `K`, `N`, routing
-padding, and backend timings. Repeating the complete shape record on several
-distinct models shows whether a simple rows-per-expert relation is stable
-enough to initialize calibration or whether the lookup needs a richer
-shape-time model.
+The per-invocation M decision is followed by capability selection using the
+actual local `K`, `N`, activation, and backend contracts. Repeating the
+complete shape record on additional models tests how broadly the 256-row
+Marlin boundary holds without introducing model-specific cutoffs.
 
 A model with nonsymmetric expert tensor shapes falls outside the current
 uniform grouped layout. In that case the existing W4A16 path remains
@@ -817,8 +911,11 @@ dynamic.
 The current work is concentrated in:
 
 - `vllm/model_executor/layers/fused_moe/experts/nvfp4_bycopy_moe.py`;
+- `vllm/model_executor/model_loader/utils.py`;
+- `vllm/model_executor/kernels/linear/nvfp4/marlin_fp8.py`;
 - `tests/kernels/moe/test_nvfp4_bycopy_moe.py`;
 - `tests/kernels/moe/test_deepgemm.py`;
+- `tests/quantization/test_modelopt.py`;
 - `csrc/libtorch_stable/moe/moe_ops.h`;
 - `csrc/libtorch_stable/moe/moe_permute_unpermute_op.cu`;
 - `csrc/libtorch_stable/moe/torch_bindings.cpp`;
@@ -829,27 +926,34 @@ The current work is concentrated in:
 The shared NVFP4-to-FP8 conversion implementation lives with the dense
 converter and supports the expert dimension.
 
+For router commit `42551d2aaa`, the three focused tests passed, the
+non-checkpoint `test_modelopt.py` selection reported 29 passed and 3
+deselected, and the pre-commit hooks passed. For topology commit `47b1ab3960`,
+the focused MoE selection/workspace run reported 13 passed and 1 skipped, and
+the pre-commit hooks passed. The tests cover exact-object gate marking, Marlin
+router dispatch, global-E knees under local expert sharding, TP and pure-EP
+support, the `N=496/512` backend boundary, runtime K/N extraction, and clearing
+remote EP slots before the second staged-Triton GEMM.
+
 ## Remaining measurements and decisions
 
 The unresolved evidence and implementation work is:
 
-1. Q3 fine-curve results around 4080, 4096, and 4112, exposing the 256-to-384
-   DeepGEMM padding boundary.
-2. Q3 GSM8K B/C results at selector cutoffs 4608 and 4096.
-3. Real per-layer expert distributions and `P/R` efficiency from the
+1. Real per-layer expert distributions and `P/R` efficiency from the
    actual-model workloads.
-4. Complete shape records for three or more additional MoE shapes.
-5. Cross-shape comparison of the first-order `M = rE/T` estimate and measured
+2. Complete shape records for three or more additional MoE shapes.
+3. Cross-shape comparison of the generic 256-row rule and measured
    crossover.
-6. Separate interpretation of local positive gain and the overall 20–40%
+4. Post-router-guard Q3 serving and paired-accuracy repetitions, plus full
+   ladders on additional model shapes.
+5. Separate interpretation of local positive gain and the overall 20–40%
    model-throughput objective.
-7. A native selectable expert operation using the proven Python sequence as
+6. A native selectable expert operation using the proven Python sequence as
    its behavioral reference.
-8. Dense router-gate treatment considered independently from the MoE expert
-   path.
 
 The established result is already stronger than functional proof: on Q3, the
 MoE-only hybrid improved actual-model throughput by 17.355%, and the complete
-dense-plus-MoE configuration improved it by 23.494%. Q36M also improved, but
-its 9.468% MoE-only result and missing route distribution show why the
-selector and shape model need evidence beyond one balanced Q3 curve.
+dense-plus-MoE configuration improved it by 23.494%. Q36M's operator curve
+independently reproduces the 256-to-257 Marlin cliff, while its 9.468%
+actual-model MoE-only result and missing route distribution leave the
+operator-to-serving mapping to be measured.

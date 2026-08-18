@@ -3234,28 +3234,40 @@ the below-knee Marlin branch at `M=1`, `M_knee=2`, and the padded-FP8 branch at
 
 ## 63. Eleven-model serving and accuracy campaign
 
-Campaign `unseen-9340d68ade-20260818-r1` was rendered from the tracked model
-matrix for the same source and overlay. It includes `nano30`, `super120`,
-`ultra550`, `deepseek_r1`, `deepseek_v4_flash`, `deepseek_v4_pro`, `qwen397`,
-`qwen36_35b`, `gemma4_26b`, `nano4_dense`, and `nano30_omni`.
+The current campaign run ID is `unseen-919b24dac-20260818-r1`. It includes
+`nano30`, `super120`, `ultra550`, `deepseek_r1`, `deepseek_v4_flash`,
+`deepseek_v4_pro`, `qwen397`, `qwen36_35b`, `gemma4_26b`, `nano4_dense`, and
+`nano30_omni`. The renderer/harness source is OCI revision `1b73b9fe8`; its
+local equivalent is `d9bf38f65a`. The packaged runtime DSOs are unchanged.
 
-The submitted graph consists of:
+The submitted graph is split so no GPU service requests four hours:
 
-- 88 performance GPU services: 11 models, native-reference and adaptive
-  variants, and 1k/1k, 5k/1k, 8k/1k, and 50k/1k workloads;
-- the full concurrency sequence `[1, 2, 4, 8, 16, 32, 64, 128, 256, 512]`
-  inside every performance service;
-- 77 five-minute CPU-only gaps between successive performance services;
-- 22 full 1,319-question GSM8K GPU services with retained per-question JSONL;
-- 11 five-minute CPU-only gaps between each model's reference and adaptive
-  GSM8K services.
+| Manifest | GPU services | CPU gaps | GPU limit | Tail job |
+|---|---:|---:|---|---:|
+| `unseen-919b24dac-20260818-r1/performance.jobs` | 88 | 88 | 45--120 min | 6170587 |
+| `unseen-919b24dac-20260818-r1-high1/performance_high.jobs` | 44 | 44 | 90 min | 6170898 |
+| Initial and resume `gsm8k.jobs` | 6 + 16 | 6 + 16 | 120 or 180 min | 6170959 |
+
+The base graph contains 1k/1k, 5k/1k, and 8k/1k at concurrency 1 through 512,
+plus 50k/1k at concurrency 1 through 128. The high graph schedules 50k/1k
+concurrency 256 and 512 independently. The 22 rewritten 50k/1k base configs
+have their post-change hashes in
+`unseen-919b24dac-20260818-r1/50k1k-configs.after.sha256`. The initial GSM8K
+manifest covers three models through job 6170608; the resume manifest covers
+the remaining eight and ends at 6170959. Every GPU service is preceded by a
+six-minute CPU allocation that provides the required five-minute separation.
 
 The native-reference service disables exactly
-`MarlinNvFp4ToFp8LinearKernel` and `NvFp4ByCopyExperts`, preserving the normal
-selection of unrelated backends. The adaptive service retains runtime M
-selection, the `floor(256 * global_experts / top_k) + 1` MoE knee, and Marlin
-dispatch for marked router gates. Native NVFP4 W4A4 remains on its existing
-path. Slurm accepted the graph under job IDs 6166687 through 6166885.
+`MarlinNvFp4ToFp8LinearKernel` and `NvFp4ByCopyExperts`, preserving unrelated
+backend selection. The adaptive service retains runtime-M selection, the
+`floor(256 * global_experts / top_k) + 1` MoE knee, and Marlin dispatch for
+marked router gates. Native NVFP4 W4A4 remains on its existing path.
+
+The shortened first service exposed that a generated config's restricted
+`PATH` hid the host `srun` before container launch. Local commit `35c31a7faa`
+and OCI revision `d74fe5d34` resolve `srun` before sourcing that config; the
+shared launch wrapper was updated before the authoritative campaign redo.
+Startup-only outputs from the earlier invocation are not result evidence.
 
 ## 64. Production staged-Triton CUDA-graph curves
 
@@ -3424,4 +3436,222 @@ combinations passed their matching reference, and the job emitted:
 
 ```text
 native-low-high-ep-router-alias-ok
+```
+
+## 66. Evidence chain and acceptance gates
+
+This section defines how raw measurements become an accepted model result. It
+does not convert submitted jobs into completed evidence.
+
+### Comparison variants
+
+| Variant | Definition | Question answered |
+|---|---|---|
+| O | Exact BF16/FP16 parent checkpoint, tokenizer, config, and revision, only when that parent is unambiguous | What accuracy was lost by checkpoint quantization and all later changes? |
+| A | The NVFP4 checkpoint with W4A16 Marlin dense and MoE kernels | What does the checkpoint produce before this replacement? |
+| B | A for dense layers and the runtime-selective FP8 path for eligible MoE layers | What did the MoE replacement alone change? |
+| C | Runtime-selective FP8 for eligible dense and MoE layers, with exact router-gate objects kept on A | What did the complete hybrid replacement change? |
+
+O is unavailable rather than approximated when no exact parent mapping exists.
+O versus A uses the model's established quantization/model-evaluation gate. A
+versus B and A versus C are the primary replacement comparisons. For a
+dense-only model, B equals A.
+
+These labels apply only to W4A16-NVFP4-eligible operations. Native NVFP4 W4A4
+operations retain their existing backend in A, B, and C. A model or layer that
+is already native W4A4 is therefore a selector no-op, not evidence of a
+W4A16-to-FP8 speedup. The same rule prevents an already-BF16 operation from
+being relabeled as a quantized candidate.
+
+### Accuracy gates
+
+Every O/A/B/C run uses the same ordered GSM8K questions, five-shot prompts,
+tokenizer, decoding options, seed, and answer parser. Each model record must
+name its pre-existing numeric absolute GSM8K threshold before results are
+interpreted. A candidate passes the hybrid replacement gate only when all of
+the following hold; an existing tighter model gate takes precedence:
+
+1. It meets the model-specific absolute GSM8K threshold.
+2. Its point accuracy delta versus A is at least `-0.5` percentage point. This
+   is the project hybrid-loss margin adopted here.
+3. The paired one-sided 95% lower confidence bound for candidate minus A is
+   greater than `-1.0` percentage point. The predeclared calculation resamples
+   whole paired question records 100,000 times with seed 42 and takes the
+   fifth percentile.
+4. It has no exact-McNemar significant regression at alpha `0.05` and no
+   increase in invalid-answer count.
+
+For candidate X, `n01` counts A-wrong/X-right questions and `n10` counts
+A-right/X-wrong questions. The paired point delta is
+`100 * (n01 - n10) / N` percentage points. With `d = n01 + n10`, the retained
+two-sided exact test is:
+
+```text
+p = min(1, 2 * BinomialCDF(min(n01, n10); d, 0.5))
+```
+
+A two-sided `p > 0.05` alone means only that this sample did not detect a
+difference. It does not establish equivalence or noninferiority. The point
+margin, paired lower bound, absolute threshold, and invalid-rate checks remain
+required. The original-versus-quantized O/A comparison may instead use an
+existing model-specific quantization gate, which must be named with the result.
+
+Applying only the already-retained point-delta and McNemar parts, router-safe
+Q3 C in section 61 is `+0.151630` percentage point with `p=0.8714147`, while
+the earlier pre-router-guard C in section 56 is `-1.137` percentage points with
+`p=0.0356978` and fails both parts. Neither statement substitutes for the
+absolute-threshold, paired-bound, or invalid-rate gates.
+
+### Fixed-token performance and target
+
+Performance comparisons require identical prompt order, request count, input
+tokens, output tokens, concurrency, KV-cache limit, topology, and server
+options. For candidate X and equal token totals, report:
+
+```text
+throughput_gain_X = output_tps_X / output_tps_A - 1
+                  = duration_A / duration_X - 1
+time_saved_X      = 1 - duration_X / duration_A
+```
+
+The end-to-end target is a 20% throughput gain, with 40% as the stretch end of
+the target range, wherever the adaptive selector engages. B/A isolates MoE,
+C/A is the headline full-hybrid result, and C/B isolates the additional dense
+effect. Points that remain below the selected knee are semantic and overhead
+controls; they are expected to stay near A and are not counted as missed
+high-M speedup targets. A row with unequal token totals is reported as an
+unmatched workload observation, not a speedup.
+
+Natural-stop GSM8K output-token/s is retained with total input/output tokens,
+latency, QPS, and invalid count as a service-health sanity measurement. Its
+variable output lengths make it unsuitable for the fixed-token speedup gate.
+
+### Knee-equation confirmation
+
+The generic MoE selector is
+
+```text
+M_knee = floor(256 * global_logical_experts / top_k) + 1
+```
+
+It is confirmed in two independent stages:
+
+1. A complete-route A/B/A microcurve constructs 255, 256, and 257 routed rows
+   per expert for each eligible `(K,N,E,top_k)` shape. It retains every raw
+   CUDA-event sample, route counts, backend alignment, component times, and
+   output-drift metrics. This tests the Marlin row-tile transition directly.
+2. Fixed-token serving repeats the formula knee and forced knees on both sides
+   with otherwise identical inputs. For each workload and concurrency it
+   reports
+   `regret = (best_forced_tps - formula_tps) / best_forced_tps`.
+
+The equation is accepted for a shape when the three-point curve has the
+predicted branch ordering and no forced serving knee reproducibly exceeds the
+formula by more than the same-run A/B/A measurement uncertainty. The broader
+forced-knee ladder records whether the formula is conservative, without
+fitting a model-specific production threshold.
+
+### GSM workload timing and routed-expert diagnostics
+
+Accuracy and timing use separate runs. The fixed-token GSM timing replay takes
+the exact retained A prompts, tokenizes them with the checkpoint tokenizer,
+freezes each request's A input length and completion-token count, enables
+ignore-EOS, and replays that same ordered length vector through A, B, and C.
+A matched random control uses the identical input/output length vector,
+arrival order, concurrency, seed, and topology. It reports the GSM-replay and
+random-control gains plus their residual:
+
+```text
+prediction_residual = gsm_fixed_token_gain - matched_random_gain
+```
+
+Agreement means the gain sign matches and the residual lies within the
+same-run repeated A/B/A uncertainty. This ties the synthetic concurrency
+curves to real prompt shapes without mixing natural-stop accuracy timing into
+the performance result. Natural GSM8K TPS is expected to lie in the envelope
+formed by these matched repeats; an outlier triggers a service-log and token-
+count audit rather than changing the accuracy score.
+
+A separate untimed diagnostic twin replays the same request set and records,
+for every observed layer call, runtime M, ordered top-k expert IDs, active
+experts, per-expert routed rows, and branch selection. It reports the fraction
+of token/layer top-k assignments that differ from A before the first generated-
+token divergence, plus the 255/256/257 occupancy histogram. Since marked
+router gates themselves remain on Marlin, this measures downstream disruption
+from upstream numerical drift rather than conversion of the gate weight.
+
+The diagnostic twin cannot be joined cycle-for-cycle to the timed run across
+scheduler-step boundaries. Request admission and completion can partition the
+same prompt set into different scheduler steps, and instrumentation can change
+that partition. The twin therefore validates route distribution and regime
+occupancy; it does not assign latency to an exact uninstrumented scheduler
+step.
+
+### Durable artifact map and forward progress
+
+The exact campaign roots are:
+
+```text
+W4_ROOT=/lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/w4a8-hopper-unified/w4a8-cuda-converter-only
+RUN=unseen-919b24dac-20260818-r1
+PACKAGE=$W4_ROOT/artifacts/full-package-96c8e4edc4-r2
+RESULTS=$W4_ROOT/results/unseen-model-matrix/$RUN
+```
+
+| Evidence | Durable location |
+|---|---|
+| Matrix and evaluator source | `benchmarks/kernels/marlin_nvfp4_w4a8_sm90/unseen_model_matrix/` |
+| Base submission provenance | `$W4_ROOT/campaigns/$RUN/performance.jobs` |
+| Separate 50k high-concurrency provenance | `$W4_ROOT/campaigns/${RUN}-high1/performance_high.jobs` |
+| GSM first three models | `$W4_ROOT/campaigns/$RUN/gsm8k.jobs` |
+| GSM remaining eight models | `$W4_ROOT/campaigns/${RUN}-gsm-resume1/gsm8k.jobs` |
+| Rewritten 50k config hashes | `$W4_ROOT/campaigns/$RUN/50k1k-configs.after.sha256` |
+| Performance raw data | `$RESULTS/<model>/performance/<variant>/<workload>[/<slice>]/bench_c<C>.json` |
+| Performance client/server logs | Same directory: `bench_c<C>.log` and `server-rank<R>.log` |
+| GSM raw data | `$RESULTS/<model>/gsm8k/<variant>/{summary.json,details.jsonl}` |
+| Paired GSM result | `$RESULTS/<model>/gsm8k/paired.summary.json` |
+| Committed operator curves | `benchmarks/kernels/marlin_nvfp4_w4a8_sm90/results/moe-production-curves/{q3-r10.jsonl,q36-r9.jsonl}` |
+| Interpretation and accepted gates | This ledger, with raw paths, revisions, job IDs, and hashes |
+
+Each submission manifest records the full runtime source revision, venv,
+predecessor job, every label-to-job mapping, tail, and SHA-256 of the three
+runtime DSOs. The audited DSO hashes are:
+
+```text
+972460e8f78554f33b854919178fdf72219794e0fc1094ea132103eb7af88b73  _C_stable_libtorch.abi3.so
+04797bb09e9daa90098e3f67fe7d1ca49ebd638c7a26f815f72edea8c751f158  _moe_C_stable_libtorch.abi3.so
+7909870a91b7a4f736e2e86fdc0dd95ce1e0a17f82feaeda57b93bb54d9890d9  third_party/deep_gemm/_C.cpython-312-x86_64-linux-gnu.so
+```
+
+Forward progress is the manifest/result join, not queue state alone. A
+performance point is complete only when its JSON parses, its requested and
+actual token totals match the comparison row, its error list is empty, and
+the server log records the intended backend. A GSM pair is complete only when
+both 1,319-row detail files have identical question IDs, prompts, and labels,
+and the paired summary reproduces their counts. Acceptance is recorded only
+after the accuracy and performance gates above are evaluated.
+
+A timeout or missing point is converted mechanically into a new narrow
+`fixupN` manifest containing only the absent model/variant/workload/concurrency
+keys. Long 50k concurrency 256 and 512 already follow this independent-job
+pattern. The validated result keyed by that full tuple replaces the missing
+point in the aggregate; unrelated completed points are neither rerun nor
+discarded.
+
+```mermaid
+flowchart LR
+  P[Checkpoint, revisions, DSO hashes] --> O[O: exact BF16/FP16 parent]
+  P --> A[A: W4A16 Marlin]
+  A --> B[B: MoE hybrid only]
+  B --> C[C: dense and MoE hybrid]
+  A --> K[255/256/257 and forced knees]
+  B --> K
+  C --> K
+  A --> G[Paired natural GSM8K]
+  B --> G
+  C --> G
+  K --> T[Fixed-token GSM replay and random twin]
+  G --> D[Untimed routed-expert twin]
+  T --> L[Raw artifacts and acceptance ledger]
+  D --> L
 ```

@@ -895,6 +895,8 @@ torch::stable::Tensor marlin_gemm(
 
 #endif
 
+#ifndef VLLM_MARLIN_NO_DISPATCH_REGISTRATION
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
   m.impl("marlin_gemm", TORCH_BOX(&marlin_gemm));
 }
+#endif

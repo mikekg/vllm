@@ -3237,8 +3237,11 @@ the below-knee Marlin branch at `M=1`, `M_knee=2`, and the padded-FP8 branch at
 The current campaign run ID is `unseen-919b24dac-20260818-r1`. It includes
 `nano30`, `super120`, `ultra550`, `deepseek_r1`, `deepseek_v4_flash`,
 `deepseek_v4_pro`, `qwen397`, `qwen36_35b`, `gemma4_26b`, `nano4_dense`, and
-`nano30_omni`. The renderer/harness source is OCI revision `1b73b9fe8`; its
-local equivalent is `d9bf38f65a`. The packaged runtime DSOs are unchanged.
+`nano30_omni`. The initial renderer source is OCI revision `1b73b9fe8`; its
+local equivalent is `d9bf38f65a`. The package and submitted manifests identify
+runtime-harness baseline `b501aabb8a8ce2a8fd5f2a59c794795cfe30f78b`;
+later evaluator and diagnostic tools are identified by their own commits and
+hashes. The packaged runtime DSOs are unchanged.
 
 The submitted graph is split so no GPU service requests four hours:
 
@@ -3247,6 +3250,8 @@ The submitted graph is split so no GPU service requests four hours:
 | `unseen-919b24dac-20260818-r1/performance.jobs` | 88 | 88 | 45--120 min | 6170587 |
 | `unseen-919b24dac-20260818-r1-high1/performance_high.jobs` | 44 | 44 | 90 min | 6170898 |
 | Initial and resume `gsm8k.jobs` | 6 + 16 | 6 + 16 | 120 or 180 min | 6170959 |
+| `unseen-919b24dac-20260818-r1-routes1/route_diagnostics.jobs` | 20 | 20 | 120 or 180 min | 6171700 |
+| `unseen-919b24dac-20260818-r1-fixed-timing1/gsm_fixed_timing.jobs` | 33 | 33 | 120 or 180 min | 6172182 |
 
 The base graph contains 1k/1k, 5k/1k, and 8k/1k at concurrency 1 through 512,
 plus 50k/1k at concurrency 1 through 128. The high graph schedules 50k/1k
@@ -3254,8 +3259,18 @@ concurrency 256 and 512 independently. The 22 rewritten 50k/1k base configs
 have their post-change hashes in
 `unseen-919b24dac-20260818-r1/50k1k-configs.after.sha256`. The initial GSM8K
 manifest covers three models through job 6170608; the resume manifest covers
-the remaining eight and ends at 6170959. Every GPU service is preceded by a
-six-minute CPU allocation that provides the required five-minute separation.
+the remaining eight and ends at 6170959. The route manifest depends on
+6170959 and contains A/C diagnostic services for the ten models with an MoE
+shape. Its SHA-256 is
+`6e77ad3a205a1fabc620928eeadfd7ea0ba0b7c952dd64c34a72e2ec2948ff64`.
+The fixed-token manifest depends on 6171700 and runs
+native-reference/adaptive/native-reference for every model. In the O/A/B/C
+notation below this is A/C/A, although its legacy run directories are
+`a1/b1/a2`. It measures headline C/A, not B/A or C/B. The manifest ends at
+6172182 and has SHA-256
+`cdf972b3ea62e7afe467270eb7df98b9271a6dfe5a191d866f1d497f7d2aad98`.
+Every GPU service is preceded by a six-minute CPU allocation that provides the
+required five-minute separation.
 
 The native-reference service disables exactly
 `MarlinNvFp4ToFp8LinearKernel` and `NvFp4ByCopyExperts`, preserving unrelated
@@ -3279,6 +3294,12 @@ root retains `path-repair/{before.sha256,after.sha256,repair.meta}`:
 | `campaigns/unseen-919b24dac-20260818-r1` | 110 |
 | `campaigns/unseen-919b24dac-20260818-r1-high1` | 154 |
 | `campaigns/unseen-919b24dac-20260818-r1-gsm-resume1` | 112 |
+
+The source-revision repair is retained under
+`campaigns/unseen-919b24dac-20260818-r1/runtime-revision-repair/` as
+`before.sha256`, `after.sha256`, `source-revision.before`, and `repair.meta`.
+The metadata records the runtime baseline and the GSM evaluator and serving
+script hashes used by the submitted jobs.
 
 ## 64. Production staged-Triton CUDA-graph curves
 
@@ -3567,37 +3588,49 @@ fitting a model-specific production threshold.
 
 Accuracy and timing use separate runs. The fixed-token GSM timing replay takes
 the exact retained A prompts, tokenizes them with the checkpoint tokenizer,
-freezes each request's A input length and completion-token count, enables
-ignore-EOS, and replays that same ordered length vector through A, B, and C.
-A matched random control uses the identical input/output length vector,
-arrival order, concurrency, seed, and topology. It reports the GSM-replay and
-random-control gains plus their residual:
+and verifies their frozen prompt-token lengths. The GSM replay and matched
+random control both force the same configured output length, 256 tokens by
+default, with ignore-EOS. The random prompts reproduce the GSM prompt-length
+vector. At concurrency `c`, each uses the same ordered prefix of
+`min(1319, max(20, min(3*c, 512)))` requests. The
+reference/candidate/repeated-reference sequence uses the same concurrency,
+seed, and topology. The analysis reports the GSM-replay and random-control
+gains plus their residual:
 
 ```text
 prediction_residual = gsm_fixed_token_gain - matched_random_gain
 ```
 
-Agreement means the gain sign matches and the residual lies within the
-same-run repeated A/B/A uncertainty. This ties the synthetic concurrency
-curves to real prompt shapes without mixing natural-stop accuracy timing into
-the performance result. Natural GSM8K TPS is expected to lie in the envelope
-formed by these matched repeats; an outlier triggers a service-log and token-
-count audit rather than changing the accuracy score.
+Agreement means C's GSM and random gains have the same sign and their residual
+lies within the bracketing A/A residual band. This ties the synthetic
+concurrency curves to real prompt shapes without mixing natural-stop accuracy
+timing into the performance result. Natural-stop GSM8K TPS remains a
+descriptive service-health measurement, not a matched performance gate,
+because its output-token vector differs.
 
-A separate untimed diagnostic twin replays the same request set and records,
-for every observed layer call, runtime M, ordered top-k expert IDs, active
-experts, per-expert routed rows, and branch selection. It reports the fraction
-of token/layer top-k assignments that differ from A before the first generated-
-token divergence, plus the 255/256/257 occupancy histogram. Since marked
-router gates themselves remain on Marlin, this measures downstream disruption
-from upstream numerical drift rather than conversion of the gate weight.
+Commit `a1ff789080` implements preparation and analysis in
+`gsm_fixed_timing.py` and `gsm_fixed_timing.sh`; commit `db414bfef0` adds
+the bounded request policy and 33-job A/C/A renderer. It retains
+`workload/provenance.json`, each raw
+`runs/<label>/{gsm8k,random}_c<C>.json`, and `summary.json`. A candidate is
+interpreted only when bracketing A runs exist; the gain signs must match and
+the GSM-minus-random residual must lie inside the observed A/A residual band.
 
-The diagnostic twin cannot be joined cycle-for-cycle to the timed run across
-scheduler-step boundaries. Request admission and completion can partition the
-same prompt set into different scheduler steps, and instrumentation can change
-that partition. The twin therefore validates route distribution and regime
-occupancy; it does not assign latency to an exact uninstrumented scheduler
-step.
+The separate untimed diagnostic in commit `a1fc0c830a` replays the retained A
+prompts and stores each returned integer `[tokens,layers,top_k]` route tensor.
+Its summary filters zero-filled non-MoE layers, records per-layer expert and
+top-k-slot counts, and reports total-variation distance from A. Generated
+continuations can differ, so the comparison is an aggregate normalized route
+distribution. Since marked router gates themselves remain on Marlin, this
+measures downstream disruption from upstream numerical drift rather than
+conversion of the gate weight.
+
+The API payload contains no scheduler-step boundary, runtime M, selected
+runtime branch, or exact P/R alignment. The diagnostic therefore cannot
+confirm a knee decision, a 255/256/257 scheduler-step occupancy histogram, or
+the exact assignment difference before output divergence. It validates
+aggregate route-distribution drift and does not assign latency to an exact
+uninstrumented scheduler step.
 
 ### Durable artifact map and forward progress
 
@@ -3617,11 +3650,18 @@ RESULTS=$W4_ROOT/results/unseen-model-matrix/$RUN
 | Separate 50k high-concurrency provenance | `$W4_ROOT/campaigns/${RUN}-high1/performance_high.jobs` |
 | GSM first three models | `$W4_ROOT/campaigns/$RUN/gsm8k.jobs` |
 | GSM remaining eight models | `$W4_ROOT/campaigns/${RUN}-gsm-resume1/gsm8k.jobs` |
+| Route diagnostic submission provenance | `$W4_ROOT/campaigns/${RUN}-routes1/route_diagnostics.jobs` |
+| Fixed-token timing submission provenance | `$W4_ROOT/campaigns/${RUN}-fixed-timing1/gsm_fixed_timing.jobs` |
+| Runtime-revision repair audit | `$W4_ROOT/campaigns/$RUN/runtime-revision-repair/` |
 | Rewritten 50k config hashes | `$W4_ROOT/campaigns/$RUN/50k1k-configs.after.sha256` |
 | Performance raw data | `$RESULTS/<model>/performance/<variant>/<workload>[/<slice>]/bench_c<C>.json` |
-| Performance client/server logs | Same directory: `bench_c<C>.log` and `server-rank<R>.log` |
+| Performance support artifacts | Same directory: `bench_c<C>.log`, `server_c<C>.log`, and `runtime_c<C>.provenance` |
 | GSM raw data | `$RESULTS/<model>/gsm8k/<variant>/{summary.json,details.jsonl}` |
 | Paired GSM result | `$RESULTS/<model>/gsm8k/paired.summary.json` |
+| Route diagnostic raw data | `$RESULTS/<model>/route_diagnostic/<variant>/{raw_responses.jsonl,summary.json}` |
+| Fixed-token timing raw data | `$RESULTS/<model>/gsm_fixed_timing/{workload/provenance.json,runs/{a1,b1,a2}/{gsm8k,random}_c<C>.json,summary.json}` |
+| Fixed-token timing implementation | `unseen_model_matrix/{gsm_fixed_timing.py,gsm_fixed_timing.sh}` at commits `a1ff789080` and `db414bfef0` |
+| Machine audit ledger | `$RESULTS/evidence-ledger.json` |
 | Committed operator curves | `benchmarks/kernels/marlin_nvfp4_w4a8_sm90/results/moe-production-curves/{q3-r10.jsonl,q36-r9.jsonl}` |
 | Interpretation and accepted gates | This ledger, with raw paths, revisions, job IDs, and hashes |
 
@@ -3634,6 +3674,28 @@ runtime DSOs. The audited DSO hashes are:
 04797bb09e9daa90098e3f67fe7d1ca49ebd638c7a26f815f72edea8c751f158  _moe_C_stable_libtorch.abi3.so
 7909870a91b7a4f736e2e86fdc0dd95ce1e0a17f82feaeda57b93bb54d9890d9  third_party/deep_gemm/_C.cpython-312-x86_64-linux-gnu.so
 ```
+
+Commit `fabb05ade2` adds `audit_results.py`, which performs the manifest/result
+join. The baseline progress snapshot generated at 2026-08-18 13:28:56 -0700
+is 1,478,993 bytes with SHA-256
+`8ac255d92aaf8b018b8342c3c0742b0d88c446b4ee91d7cbb2f8a1b537111d9e`.
+It records 0 of 880 complete performance artifacts, 0 of 440 complete
+performance pairs, 0 of 22 complete GSM artifacts, 0 of 11 complete GSM
+pairs, and 902 exact retry rows. Its decisions are accuracy `pending`,
+performance `pending_target_scope`, structural evidence `fail`, and checkpoint
+revision provenance `fail`. These values establish the pre-result baseline;
+they do not interpret queued work as accepted evidence.
+
+This schema-1 snapshot covers base/high performance and natural-stop GSM8K.
+The route and fixed-token timing manifests and summaries are separate
+evidence; they are not included in these 902 retry rows.
+
+The auditor writes the JSON before returning and exits zero only when
+`decision.successful` is true, otherwise it exits one. Artifact and pair
+statuses are `complete`, `missing`, or `invalid`; `retry_rows` identifies the
+exact tuples to rerun. Later `--manifest` arguments supersede earlier duplicate
+job labels. The top-level accuracy decision is `pass`, `pending`, or `fail`,
+and performance is `pending_target_scope`, `pending`, `pass`, or `fail`.
 
 Forward progress is the manifest/result join, not queue state alone. A
 performance point is complete only when its JSON parses, its requested and

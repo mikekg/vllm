@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-#SBATCH --partition=batch_short
+#SBATCH --partition=backfill
 #SBATCH --account=sw_aidot
 #SBATCH --qos=normal
 #SBATCH --constraint=H100

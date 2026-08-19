@@ -11,13 +11,15 @@ from types import SimpleNamespace
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
     fp8_w8a8_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
@@ -183,13 +185,18 @@ def run_shape(
     production_only: bool = False,
 ) -> None:
     e, n, k, topk = SHAPES[name]
-    config = make_dummy_moe_config(
+    config = FusedMoEConfig(
         num_experts=e,
         num_local_experts=e,
+        num_logical_experts=e,
         experts_per_token=topk,
         hidden_dim=k,
         intermediate_size=n,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
         in_dtype=torch.bfloat16,
+        device="cuda",
+        routing_method=RoutingMethodType.TopK,
         max_num_tokens=max(ms),
     )
     layer, quant = make_weights(e, n, k)

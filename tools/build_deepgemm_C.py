@@ -47,6 +47,15 @@ if "#include <utility>" in utils_source:
 
 compiler = patched_csrc / "jit" / "compiler.hpp"
 compiler_source = compiler.read_text()
+cuda_include = (
+    '        include_dirs += fmt::format("-I{} ", (cuda_home / "include").string());\n'
+)
+assert compiler_source.count(cuda_include) == 1
+compiler_source = compiler_source.replace(
+    cuda_include,
+    cuda_include + '        include_dirs += fmt::format("-I{} ", '
+    '(cuda_home / "include" / "cccl").string());\n',
+)
 # NVRTC omits device-runtime declarations that NVCC pre-includes.
 nvrtc_flags = ' --device-int128",'
 assert compiler_source.count(nvrtc_flags) == 1

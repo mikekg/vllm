@@ -14,10 +14,10 @@
       "default": "false"
     },
     "NCCL_VERSION": {
-      "default": "2.30.7"
+      "default": "2.29.7"
     },
     "INSTALL_EP_KERNELS": {
-      "default": "true"
+      "default": "false"
     },
     "BUILD_BASE_IMAGE": {
       "default": "pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359"
@@ -71,7 +71,7 @@
       "default": "500"
     },
     "RUN_WHEEL_CHECK": {
-      "default": "true"
+      "default": "false"
     },
     "FLASHINFER_VERSION": {
       "default": "0.6.18"

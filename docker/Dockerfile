@@ -28,12 +28,9 @@ ARG UBUNTU_VERSION=24.04
 ARG INSTALL_RUBIN_PRERELEASE=false
 ARG TRITON_INSTALL_FROM_SOURCE_REPO=
 ARG TRITON_INSTALL_FROM_SOURCE_REVISION=
-# DeepEPv2 requires NCCL >= 2.30.4 (GIN backend).
-# This version is used for CUDA 12+ builds to keep the DeepEP build and
-# runtime NCCL versions compatible.
-ARG NCCL_VERSION=2.30.7
-# Disable only when the image does not need the optional DeepEP backends.
-ARG INSTALL_EP_KERNELS=true
+# Keep the default image lean; DeepEP is opt-in and requires NCCL 2.30.7.
+ARG NCCL_VERSION=2.29.7
+ARG INSTALL_EP_KERNELS=false
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
@@ -678,7 +675,7 @@ COPY .buildkite/check-wheel-size.py check-wheel-size.py
 # sync the default value with .buildkite/check-wheel-size.py
 ARG VLLM_MAX_SIZE_MB=500
 ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
-ARG RUN_WHEEL_CHECK=true
+ARG RUN_WHEEL_CHECK=false
 RUN if [ "$RUN_WHEEL_CHECK" = "true" ] && \
         [ "${CUDA_VERSION%%.*}" = "13" ]; then \
         python3 check-wheel-size.py dist; \

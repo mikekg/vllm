@@ -24,10 +24,8 @@ The `extensions-build` stage can also produce an optional source-built Triton
 wheel. `vllm-openai-base` installs that wheel after its other Python
 dependencies so dependency resolution cannot restore an older Triton version.
 
-DeepEP kernels are built in `extensions-build` and installed in `vllm-base`
-and `test` by default. Pass `--build-arg INSTALL_EP_KERNELS=false` to skip the
-DeepEP build and both installations; enabled builds require
-`NCCL_VERSION=2.30.7`.
+DeepEP kernels are disabled by default to keep the image lean. Opt in with
+`--build-arg INSTALL_EP_KERNELS=true --build-arg NCCL_VERSION=2.30.7`.
 
   > <figure markdown="span">
   >   ![](../../assets/contributing/dockerfile-stages-dependency.png){ align="center" alt="query" width="100%" }

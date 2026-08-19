@@ -111,6 +111,7 @@ def common_env(
         "TRANSFORMERS_OFFLINE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
         "CUDA_MODULE_LOADING": "EAGER",
+        "VLLM_ENGINE_READY_TIMEOUT_S": "1800",
         "VLLM_USE_DEEP_GEMM": "1",
         "DG_JIT_USE_NVRTC": "1",
         "VLLM_TEST_FORCE_FP8_MARLIN": "0",
@@ -216,10 +217,16 @@ def header(
         venv, revision = package
         artifact = str(Path(venv).parent)
         site = f"{venv}/lib/python3.12/site-packages/vllm"
+        package_site = f"{venv}/lib/python3.12/site-packages"
         libraries = [
             f"{site}/_C_stable_libtorch.abi3.so",
             f"{site}/_moe_C_stable_libtorch.abi3.so",
             f"{site}/third_party/deep_gemm/_C.cpython-312-x86_64-linux-gnu.so",
+        ]
+        flashinfer_packages = [
+            f"{package_site}/flashinfer_python-0.6.16.post3.dist-info",
+            f"{package_site}/flashinfer_cubin-0.6.16.post3.dist-info",
+            f"{package_site}/flashinfer_jit_cache-0.6.16.post3+cu130.dist-info",
         ]
         lines.extend(
             [
@@ -229,6 +236,9 @@ def header(
                 f"{shlex.quote(revision)} ]]",
                 f"[[ -L {shlex.quote(f'{artifact}/cuda')} ]]",
                 *[f"[[ -s {shlex.quote(path)} ]]" for path in libraries],
+                *[f"[[ -d {shlex.quote(path)} ]]" for path in flashinfer_packages],
+                "grep -q set_autotune_process_group "
+                f"{shlex.quote(f'{package_site}/flashinfer/autotuner/__init__.py')}",
                 'grep -q _vllm_is_moe_router "$site/model_executor/'
                 'model_loader/utils.py"',
                 'grep -q _vllm_is_moe_router "$site/model_executor/kernels/'
@@ -328,7 +338,6 @@ def render_performance(
                             "OSL": str(matrix["output_tokens"]),
                             "CONCS": slice_concurrencies,
                             "RESULT_DIR": result,
-                            "CACHE_ROOT": f"{result}/cache",
                             "IXBENCH": (
                                 f"{runtime['shared_scripts']}/"
                                 "bench_serving/benchmark_serving.py"
@@ -401,7 +410,6 @@ def render_gsm8k(
                     "MML_OVERRIDE": "2048",
                     "MAX_NUM_SEQS": "64",
                     "RESULT_DIR": result,
-                    "CACHE_ROOT": f"{result}/cache",
                     "GSM8K_CLIENT": f"{source}/gsm8k_endpoint.py",
                     "GSM8K_DATA": runtime["gsm8k_data"],
                     "GSM8K_VARIANT": variant,
@@ -474,7 +482,6 @@ def render_gsm_fixed_timing(
                     "OSL": "256",
                     "MML_OVERRIDE": "2048",
                     "RESULT_DIR": result,
-                    "CACHE_ROOT": f"{result}/cache",
                     "GSM_FIXED_TIMING_CLIENT": f"{source}/gsm_fixed_timing.sh",
                     "GSM8K_DETAILS": f"{accuracy_root}/details.jsonl",
                     "ACCURACY_SUMMARY": f"{accuracy_root}/summary.json",
@@ -556,7 +563,6 @@ def render_route_diagnostics(
                     "MML_OVERRIDE": "2048",
                     "MAX_NUM_SEQS": "64",
                     "RESULT_DIR": result,
-                    "CACHE_ROOT": f"{result}/cache",
                     "GSM8K_CLIENT": f"{source}/routed_expert_diagnostic.py",
                     "GSM8K_DATA": retained,
                     "GSM8K_VARIANT": variant,

@@ -14,7 +14,6 @@ source "$1"
 : "${ISL:?}"
 : "${OSL:?}"
 : "${RESULT_DIR:?}"
-: "${CACHE_ROOT:?}"
 : "${PYTHON:?}"
 : "${CUDA_HOME:?}"
 
@@ -23,7 +22,6 @@ source "$1"
 [[ -x $CUDA_HOME/bin/cuobjdump ]]
 
 : "${SLURM_JOB_ID:?}"
-PORT=${PORT:-$((10000 + SLURM_JOB_ID % 20000))}
 MASTER_PORT=${MASTER_PORT:-$((30000 + SLURM_JOB_ID % 20000))}
 GPU_UTIL=${GPU_UTIL:-0.9}
 RANGE_RATIO=${RANGE_RATIO:-0.8}
@@ -32,10 +30,35 @@ NODES=${NODES:-1}
 NODE_RANK=${SLURM_NODEID:-0}
 LOG="$RESULT_DIR/server-rank${NODE_RANK}.log"
 STOP="$RESULT_DIR/.stop-$SLURM_JOB_ID"
-mkdir -p "$RESULT_DIR" "$CACHE_ROOT"
-export VLLM_CACHE_ROOT="$CACHE_ROOT"
-export DG_JIT_CACHE_DIR="$CACHE_ROOT/deep_gemm"
-mkdir -p "$DG_JIT_CACHE_DIR"
+SCRATCH=${SLURM_TMPDIR:-/tmp}
+[[ -d $SCRATCH && -w $SCRATCH ]] || SCRATCH=/tmp
+RUNTIME_CACHE=$(mktemp -d \
+  "$SCRATCH/w4a8-${SLURM_JOB_ID}-${NODE_RANK}.XXXXXX")
+mkdir -p "$RESULT_DIR"
+export TMPDIR="$RUNTIME_CACHE/tmp"
+export XDG_CACHE_HOME="$RUNTIME_CACHE/xdg-cache"
+export XDG_CONFIG_HOME="$RUNTIME_CACHE/xdg-config"
+export HF_HOME="$RUNTIME_CACHE/huggingface"
+export TRITON_CACHE_DIR="$RUNTIME_CACHE/triton"
+export CUDA_CACHE_PATH="$RUNTIME_CACHE/cuda"
+export TORCHINDUCTOR_CACHE_DIR="$RUNTIME_CACHE/torchinductor"
+export FLASHINFER_WORKSPACE_BASE="$RUNTIME_CACHE/flashinfer"
+export VLLM_CACHE_ROOT="$RUNTIME_CACHE/vllm"
+export VLLM_CONFIG_ROOT="$RUNTIME_CACHE/vllm-config"
+export VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR="$RUNTIME_CACHE/flashinfer-autotune"
+export DG_JIT_CACHE_DIR="$RUNTIME_CACHE/deep_gemm"
+export VLLM_ENGINE_READY_TIMEOUT_S=${VLLM_ENGINE_READY_TIMEOUT_S:-1800}
+export VLLM_NO_USAGE_STATS=1
+mkdir -p \
+  "$TMPDIR" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$HF_HOME" \
+  "$TRITON_CACHE_DIR" "$CUDA_CACHE_PATH" "$TORCHINDUCTOR_CACHE_DIR" \
+  "$FLASHINFER_WORKSPACE_BASE" "$VLLM_CACHE_ROOT" \
+  "$VLLM_CONFIG_ROOT" "$VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR" \
+  "$DG_JIT_CACHE_DIR"
+if [[ -z ${PORT:-} ]]; then
+  PORT=$("$PYTHON" -c \
+    'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')
+fi
 client_source=${GSM8K_CLIENT:-${GSM_FIXED_TIMING_CLIENT:-${IXBENCH:-}}}
 : "${client_source:?benchmark client required}"
 if ((NODE_RANK == 0)); then
@@ -85,6 +108,7 @@ cleanup() {
   fi
   kill "$server_pid" 2>/dev/null || true
   wait "$server_pid" 2>/dev/null || true
+  rm -rf -- "$RUNTIME_CACHE"
 }
 trap cleanup EXIT
 
@@ -103,12 +127,13 @@ fi
 
 ready=0
 for _ in {1..360}; do
-  if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null; then
-    ready=1
-    break
-  fi
   if ! kill -0 "$server_pid" 2>/dev/null; then
     wait "$server_pid"
+  fi
+  if curl --connect-timeout 2 --max-time 2 -fsS \
+    "http://127.0.0.1:$PORT/health" >/dev/null; then
+    ready=1
+    break
   fi
   sleep 10
 done

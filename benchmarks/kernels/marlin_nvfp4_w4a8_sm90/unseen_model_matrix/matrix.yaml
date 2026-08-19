@@ -137,25 +137,8 @@ models:
     formula_knee: 10923
     hybrid_action: per_layer
 
-  - id: deepseek_v4_pro
-    model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/mmpareto/hfcache/DeepSeek-V4-Pro-NVFP4
-    repo: local-cache/DeepSeek-V4-Pro-NVFP4
-    revision: null
-    accuracy_threshold: null
-    accuracy_threshold_reason: the existing config targets amd/DeepSeek-V4-Pro-NVFP4, not this local-cache identity
-    original_model: null
-    original_model_reason: the flat local cache records no BF16 or FP16 parent repo and revision
-    topology:
-      engine_tp: 16
-      enable_expert_parallel: true
-      moe_tp: 1
-      moe_ep: 16
-      dp: 1
-      nodes: 2
-      gpus_per_node: 8
-    moe_shape: {global_experts: 384, top_k: 6, hidden_k: 7168, intermediate_n: 3072, layers: 61}
-    formula_knee: 16385
-    hybrid_action: per_layer
+  # DeepSeek V4 Pro is excluded until its local cache is complete. It currently
+  # has one of 64 weight shards, no index, and no tokenizer files.
 
   - id: qwen397
     model_path: /lustre/fs1/portfolios/sw/projects/sw_aidot/users/mgschwind/mmpareto/hfcache/Qwen3.5-397B-A17B-NVFP4

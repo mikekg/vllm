@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+import sys
 from dataclasses import dataclass
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+from vllm.model_executor.warmup import kernel_warmup
 from vllm.model_executor.warmup.jit_warmup import (
     JitWarmupRegistry,
     VllmJitKernel,
@@ -18,6 +20,28 @@ from vllm.model_executor.warmup.jit_warmup import (
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_scalar_specialization_rep,
 )
+
+
+def test_flashinfer_autotune_skips_package_without_sync(monkeypatch) -> None:
+    flashinfer = ModuleType("flashinfer")
+    flashinfer.__path__ = []  # type: ignore[attr-defined]
+    autotuner = ModuleType("flashinfer.autotuner")
+    autotuner.AutoTuner = object  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "flashinfer", flashinfer)
+    monkeypatch.setitem(sys.modules, "flashinfer.autotuner", autotuner)
+    warnings = []
+    monkeypatch.setattr(
+        kernel_warmup.logger,
+        "warning_once",
+        lambda message: warnings.append(message),
+    )
+
+    kernel_warmup.flashinfer_autotune(cast(Any, None))
+
+    assert warnings == [
+        "Installed FlashInfer does not support synchronized autotuning; "
+        "using its runtime heuristics instead."
+    ]
 
 
 def _next_power_of_2(value: int) -> int:

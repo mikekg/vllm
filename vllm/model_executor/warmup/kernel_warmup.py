@@ -310,7 +310,14 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     timings are averaged over the world CPU group so all ranks select the
     same tactic.
     """
-    from flashinfer.autotuner import AutoTuner, set_autotune_process_group
+    try:
+        from flashinfer.autotuner import AutoTuner, set_autotune_process_group
+    except ImportError:
+        logger.warning_once(
+            "Installed FlashInfer does not support synchronized autotuning; "
+            "using its runtime heuristics instead."
+        )
+        return
 
     import vllm.utils.flashinfer as fi_utils
     from vllm.distributed.parallel_state import get_world_group

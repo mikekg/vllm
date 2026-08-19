@@ -82,6 +82,11 @@ def _lookup_moe_m_knee(
     return 256 * experts // topk + 1
 
 
+def _triton_m_knee(shape: MoeShape) -> int:
+    experts, _, _, topk, _ = shape
+    return (160 * experts + topk - 1) // topk
+
+
 def _deepgemm_shape_supported(
     m: int, n: int, k: int, activation: MoEActivation
 ) -> bool:
@@ -626,7 +631,7 @@ class NvFp4ToFp8Experts(FallbackExperts):
 
 
 class NvFp4ByCopyExperts(FallbackExperts):
-    """Select Marlin or staged FP8 experts from post-dispatch M."""
+    """Select Marlin, staged Triton, or native DeepGEMM from M."""
 
     def __init__(
         self,
@@ -637,10 +642,12 @@ class NvFp4ByCopyExperts(FallbackExperts):
         fallback = MarlinExperts(moe_config, quant_config)
         super().__init__(experts=experts, fallback_experts=fallback)
         self.bycopy_experts = experts
+        shape = _moe_shape(moe_config)
+        self.triton_m_knee = _triton_m_knee(shape)
         self.m_knee = _lookup_moe_m_knee(
             current_platform.get_device_name(),
             moe_config.in_dtype,
-            _moe_shape(moe_config),
+            shape,
         )
         self.marlin_workspace: torch.Tensor | None = None
         self.w13_fp8_scale_divisor_code: torch.Tensor | None = None
@@ -728,12 +735,22 @@ class NvFp4ByCopyExperts(FallbackExperts):
         return self.fallback_experts.moe_problem_size(a1, w1, w2, topk_ids)
 
     def _use_bycopy(self, m: int) -> bool:
-        return type(m) is int and self.m_knee is not None and m >= self.m_knee
+        return type(m) is int and self.m_knee is not None and m >= self.triton_m_knee
 
-    def _use_native(self, n: int, k: int, activation: MoEActivation) -> bool:
+    def _select_non_native_experts(self, m: int) -> mk.FusedMoEExpertsModular:
+        if not self._use_bycopy(m):
+            return self.fallback_experts
+        assert self.m_knee is not None
+        if m < self.m_knee:
+            return self.bycopy_experts.fallback_experts
+        return self.experts
+
+    def _use_native(self, m: int, n: int, k: int, activation: MoEActivation) -> bool:
         return (
-            self.m_knee is not None
-            and _deepgemm_shape_supported(self.m_knee, n, k, activation)
+            type(m) is int
+            and self.m_knee is not None
+            and m >= self.m_knee
+            and _deepgemm_shape_supported(m, n, k, activation)
             and hasattr(torch.ops._C, "marlin_nvfp4_hybrid_moe")
         )
 
@@ -750,7 +767,7 @@ class NvFp4ByCopyExperts(FallbackExperts):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         if global_num_experts == -1:
             global_num_experts = local_num_experts
-        if self._use_native(N, K, activation):
+        if self._use_native(M, N, K, activation):
             arena_bytes = _native_moe_arena_bytes(
                 M,
                 N,
@@ -766,7 +783,7 @@ class NvFp4ByCopyExperts(FallbackExperts):
                 (0,),
                 (M, K),
             )
-        experts = self.experts if self._use_bycopy(M) else self.fallback_experts
+        experts = self._select_non_native_experts(M)
         return experts.workspace_shapes(
             M,
             N,
@@ -796,8 +813,8 @@ class NvFp4ByCopyExperts(FallbackExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        _, _, n, k, _ = self.moe_problem_size(hidden_states, w1, w2, topk_ids)
-        if not self._use_native(n, k, activation):
+        _, m, n, k, _ = self.moe_problem_size(hidden_states, w1, w2, topk_ids)
+        if not self._use_native(m, n, k, activation):
             return super().apply(
                 output,
                 hidden_states,
@@ -849,11 +866,7 @@ class NvFp4ByCopyExperts(FallbackExperts):
         w2: torch.Tensor,
     ) -> mk.FusedMoEExpertsModular:
         del w1, w2
-        return (
-            self.experts
-            if self._use_bycopy(hidden_states.shape[0])
-            else self.fallback_experts
-        )
+        return self._select_non_native_experts(hidden_states.shape[0])
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.m_knee is None:
@@ -880,7 +893,7 @@ class NvFp4ByCopyExperts(FallbackExperts):
         dtype = self.moe_config.in_dtype
 
         native_bytes = 0
-        if self._use_native(n, k, self.moe_config.activation):
+        if self._use_native(m, n, k, self.moe_config.activation):
             native_bytes = round_up(
                 max(
                     _native_moe_arena_bytes(

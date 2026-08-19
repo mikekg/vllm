@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.experts.nvfp4_bycopy_moe import (
     _deepgemm_shape_supported,
     _lookup_moe_m_knee,
     _moe_shape,
+    _triton_m_knee,
 )
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
@@ -52,11 +53,11 @@ def _config(
     )
 
 
-def test_universal_knee_and_post_dispatch_selection():
-    assert (
-        _lookup_moe_m_knee("unknown GPU", torch.float16, (128, 704, 2048, 8, True))
-        == 4097
-    )
+def test_universal_knees_and_three_way_selection():
+    shape = (128, 704, 2048, 8, True)
+    assert _lookup_moe_m_knee("unknown GPU", torch.float16, shape) == 4097
+    assert _triton_m_knee(shape) == 2560
+    assert _triton_m_knee((128, 704, 2048, 3, True)) == 6827
     assert (
         _lookup_moe_m_knee("unknown GPU", torch.float16, (256, 512, 2048, 8, True))
         == 8193
@@ -69,11 +70,77 @@ def test_universal_knee_and_post_dispatch_selection():
     assert (
         _lookup_moe_m_knee("unknown GPU", torch.float16, _moe_shape(ep_config)) == 4097
     )
+    assert _triton_m_knee(_moe_shape(ep_config)) == 2560
 
     experts = object.__new__(NvFp4ByCopyExperts)
+    experts.triton_m_knee = 2560
     experts.m_knee = 4097
-    assert not experts._use_bycopy(4096)
-    assert experts._use_bycopy(4097)
+    marlin = MagicMock()
+    triton = MagicMock()
+    deepgemm = MagicMock()
+    experts.fallback_experts = marlin
+    experts.bycopy_experts = SimpleNamespace(fallback_experts=triton)
+    experts.experts = deepgemm
+
+    assert experts._select_non_native_experts(2559) is marlin
+    assert experts._select_non_native_experts(2560) is triton
+    assert experts._select_non_native_experts(4096) is triton
+    assert experts._select_non_native_experts(4097) is deepgemm
+
+
+@pytest.mark.parametrize(
+    ("m", "backend"),
+    [(159, "marlin"), (160, "triton"), (256, "triton"), (257, "triton")],
+)
+def test_workspace_and_apply_agree_at_three_way_boundaries(monkeypatch, m, backend):
+    e, n, k, topk = 1, 128, 128, 1
+    implementations = {
+        "marlin": MagicMock(),
+        "triton": MagicMock(),
+        "deepgemm": MagicMock(),
+    }
+    bycopy = object.__new__(NvFp4ToFp8Experts)
+    bycopy.moe_config = _config(e=e, p=n, k=k, topk=topk)
+    bycopy.experts = implementations["deepgemm"]
+    bycopy.fallback_experts = implementations["triton"]
+
+    experts = object.__new__(NvFp4ByCopyExperts)
+    experts.moe_config = bycopy.moe_config
+    experts.triton_m_knee = 160
+    experts.m_knee = 257
+    experts.fallback_experts = implementations["marlin"]
+    experts.bycopy_experts = bycopy
+    experts.experts = bycopy
+    experts.moe_problem_size = MagicMock(return_value=(e, m, n, k, topk))
+
+    monkeypatch.setattr(nvfp4_bycopy_moe.torch.ops, "_C", SimpleNamespace())
+    monkeypatch.setattr(nvfp4_bycopy_moe, "_deepgemm_shape_supported", lambda *_: False)
+    monkeypatch.setattr(nvfp4_bycopy_moe, "marlin_moe_intermediate_size", lambda *_: n)
+
+    experts.workspace_shapes(m, n, k, topk, e, e, None, MoEActivation.SILU)
+    hidden = torch.empty((m, k), device="meta")
+    experts.apply(
+        None,
+        hidden,
+        None,
+        None,
+        None,
+        None,
+        MoEActivation.SILU,
+        e,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        False,
+    )
+
+    for name, implementation in implementations.items():
+        expected_calls = int(name == backend)
+        assert implementation.workspace_shapes.call_count == expected_calls
+        assert implementation.apply.call_count == expected_calls
 
 
 def test_deepgemm_selector_uses_runtime_m_and_static_layer_shape(monkeypatch):
@@ -189,8 +256,8 @@ def test_enabled_path_binds_codes_and_reserves_all_backends(monkeypatch):
     reserve.assert_called_once_with(1280)
 
 
-def test_native_outer_op_receives_both_resident_branches(monkeypatch):
-    e, m, n, k, topk = 2, 4, 512, 128, 1
+def test_native_outer_op_starts_at_deep_knee(monkeypatch):
+    e, m, n, k, topk = 2, 8, 512, 128, 1
     config = _config(e=e, p=n, k=k, topk=topk)
     w13_scale = torch.empty((e, k // 16, 2 * n), dtype=torch.bfloat16)
     w2_scale = torch.empty((e, n // 16, k), dtype=torch.bfloat16)
@@ -213,6 +280,8 @@ def test_native_outer_op_receives_both_resident_branches(monkeypatch):
     monkeypatch.setattr(
         nvfp4_bycopy_moe, "_deepgemm_shape_supported", lambda *args: True
     )
+    assert not experts._use_native(m - 1, n, k, MoEActivation.SILU)
+    assert experts._use_native(m, n, k, MoEActivation.SILU)
 
     workspace13_shape, workspace2_shape, output_shape = experts.workspace_shapes(
         m, n, k, topk, e, e, None, MoEActivation.SILU
@@ -700,7 +769,7 @@ def test_real_native_outer_matches_branch_references_at_runtime_knee():
             native_experts.w2_fp8_scale_divisor_code = (
                 case.layer.w2_fp8_scale_divisor_code
             )
-            assert native_experts._use_native(n, k, MoEActivation.SILU)
+            assert native_experts._use_native(knee, n, k, MoEActivation.SILU)
             marlin_experts = MarlinExperts(config, case.quant_config)
             deepgemm_experts = native_experts.bycopy_experts.experts
             deepgemm_experts.w13_fp8_scale_divisor_code = (

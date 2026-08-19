@@ -32,6 +32,8 @@ ARG TRITON_INSTALL_FROM_SOURCE_REVISION=
 # This version is used for CUDA 12+ builds to keep the DeepEP build and
 # runtime NCCL versions compatible.
 ARG NCCL_VERSION=2.30.7
+# Disable only when the image does not need the optional DeepEP backends.
+ARG INSTALL_EP_KERNELS=true
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
@@ -495,35 +497,42 @@ COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.
 ARG DEEPEP_COMMIT_HASH=d4f41e4e93
 ARG NVSHMEM_VER
 ARG NCCL_VERSION
+ARG INSTALL_EP_KERNELS
 RUN --mount=type=cache,target=/opt/uv/cache \
     mkdir -p /tmp/ep_kernels_workspace/dist && \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        # The Rubin CUDA builder provides NCCL in its architecture-specific \
-        # toolkit directory rather than as a Python package. Give DeepEP a \
-        # stable prefix that also exists in the Ubuntu runtime image. \
-        NCCL_HEADER=$(find /usr/local/cuda/targets -name nccl.h -print -quit) \
-        && test -n "${NCCL_HEADER}" \
-        && NCCL_LIBRARY=$(find -H /usr/local/cuda/targets \
-            -name libnccl.so.2 -print -quit) \
-        && test -n "${NCCL_LIBRARY}" \
-        && ln -sf "${NCCL_HEADER}" /usr/include/nccl.h \
-        && ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2 \
-        && ln -sf libnccl.so.2 /usr/lib/libnccl.so \
-        && export EP_NCCL_ROOT_DIR=/usr; \
-    fi && \
-    CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
-    if [ -n "$NCCL_VERSION" ]; then \
-        echo "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
-            > /tmp/nccl-override.txt && \
-        export UV_OVERRIDE=/tmp/nccl-override.txt; \
-    fi && \
-    export TORCH_CUDA_ARCH_LIST='9.0a 10.0a' && \
-    /tmp/install_python_libraries.sh \
-        --workspace /tmp/ep_kernels_workspace \
-        --mode wheel \
-        ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} \
-        ${NVSHMEM_VER:+--nvshmem-ver "$NVSHMEM_VER"} && \
-    find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
+    if [ "$INSTALL_EP_KERNELS" = "true" ]; then \
+        if [ "$NCCL_VERSION" != "2.30.7" ]; then \
+            echo >&2 "INSTALL_EP_KERNELS=true requires NCCL_VERSION=2.30.7"; \
+            exit 1; \
+        fi && \
+        if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+            # The Rubin CUDA builder provides NCCL in its architecture-specific \
+            # toolkit directory rather than as a Python package. Give DeepEP a \
+            # stable prefix that also exists in the Ubuntu runtime image. \
+            NCCL_HEADER=$(find /usr/local/cuda/targets -name nccl.h -print -quit) \
+            && test -n "${NCCL_HEADER}" \
+            && NCCL_LIBRARY=$(find -H /usr/local/cuda/targets \
+                -name libnccl.so.2 -print -quit) \
+            && test -n "${NCCL_LIBRARY}" \
+            && ln -sf "${NCCL_HEADER}" /usr/include/nccl.h \
+            && ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2 \
+            && ln -sf libnccl.so.2 /usr/lib/libnccl.so \
+            && export EP_NCCL_ROOT_DIR=/usr; \
+        fi && \
+        CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
+        if [ -n "$NCCL_VERSION" ]; then \
+            echo "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
+                > /tmp/nccl-override.txt && \
+            export UV_OVERRIDE=/tmp/nccl-override.txt; \
+        fi && \
+        export TORCH_CUDA_ARCH_LIST='9.0a 10.0a' && \
+        /tmp/install_python_libraries.sh \
+            --workspace /tmp/ep_kernels_workspace \
+            --mode wheel \
+            ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} \
+            ${NVSHMEM_VER:+--nvshmem-ver "$NVSHMEM_VER"} && \
+        find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete; \
+    fi
 
 # Build Triton from source when a repository is configured. Triton 3.8 pins
 # ptxas-blackwell 13.3, which cannot assemble SM107. Rubin CUDA 13.4 and 13.5
@@ -661,8 +670,8 @@ RUN sha256sum dist/*.whl > dist/wheel.sha256
 COPY --from=extensions-build /tmp/ep_kernels_workspace/dist /tmp/ep_kernels_workspace/dist
 
 # Record the EP kernels wheel checksum for the same cache-busting purpose.
-RUN sha256sum /tmp/ep_kernels_workspace/dist/*.whl \
-    > /tmp/ep_kernels_workspace/dist/wheels.sha256
+RUN find /tmp/ep_kernels_workspace/dist -maxdepth 1 -type f -name '*.whl' \
+    -exec sha256sum {} + > /tmp/ep_kernels_workspace/dist/wheels.sha256
 
 # Check the size of the CUDA 13 wheel uploaded to PyPI
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
@@ -851,9 +860,7 @@ RUN mkdir -p "${UV_PYTHON_INSTALL_DIR}" "${UV_CACHE_DIR}" \
     && chgrp -R 0 /opt/uv \
     && chmod -R g+rwX,a+rX /opt/uv
 
-# DeepEPv2 GIN requires NCCL >= 2.30.4 at both compile and runtime. torch pins
-# an older version as a transitive dep; this override forces uv to use our
-# pinned version whenever nvidia-nccl-cu* is resolved.
+# Keep every uv transaction on the image's explicit runtime NCCL version.
 RUN CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
     if [ -n "$NCCL_VERSION" ]; then \
         echo "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
@@ -991,6 +998,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 
 FROM vllm-runtime-base AS vllm-base
 
+ARG INSTALL_EP_KERNELS
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
@@ -1035,8 +1043,10 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 COPY --from=build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/opt/uv/cache \
-    uv pip install --system ep_kernels/dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    if [ "$INSTALL_EP_KERNELS" = "true" ]; then \
+        uv pip install --system ep_kernels/dist/*.whl --verbose \
+            --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    fi
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
@@ -1111,6 +1121,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 FROM test-deps AS test
 
 ARG PYTHON_VERSION
+ARG INSTALL_EP_KERNELS
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -1145,8 +1156,10 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 COPY --from=build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/opt/uv/cache \
-    uv pip install --system ep_kernels/dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    if [ "$INSTALL_EP_KERNELS" = "true" ]; then \
+        uv pip install --system ep_kernels/dist/*.whl --verbose \
+            --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    fi
 
 # See the matching comment in the vllm-base stage.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
@@ -1218,7 +1231,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             apt-get purge -y ${BUILD_PKGS} && \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
-        ); \
+        ) && \
         # The default mooncake wheel links libcudart.so.12, so on CUDA 13 swap in the
         # cuda13 variant. Uninstall first; both ship the `mooncake` package.
         # Mirrors .buildkite/scripts/install-kv-connectors.sh.

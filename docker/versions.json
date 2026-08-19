@@ -16,6 +16,9 @@
     "NCCL_VERSION": {
       "default": "2.30.7"
     },
+    "INSTALL_EP_KERNELS": {
+      "default": "true"
+    },
     "BUILD_BASE_IMAGE": {
       "default": "pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359"
     },

@@ -90,6 +90,28 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
 
 
+def test_nvfp4_force_hybrid_modes_and_legacy_alias(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    getter = environment_variables["VLLM_NVFP4_FORCE_HYBRID"]
+    monkeypatch.delenv("VLLM_NVFP4_FORCE_HYBRID", raising=False)
+    monkeypatch.delenv("VLLM_TEST_FORCE_FP8_MARLIN", raising=False)
+    assert getter() is None
+
+    monkeypatch.setenv("VLLM_NVFP4_FORCE_HYBRID", "w4a8")
+    assert getter() == "w4a8"
+    monkeypatch.setenv("VLLM_NVFP4_FORCE_HYBRID", "W4A8")
+    with pytest.raises(ValueError, match="Invalid value 'W4A8'"):
+        getter()
+
+    monkeypatch.delenv("VLLM_NVFP4_FORCE_HYBRID")
+    monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
+    assert getter() == "w4a16"
+    monkeypatch.setenv("VLLM_NVFP4_FORCE_HYBRID", "w4a8")
+    with pytest.raises(ValueError, match="conflicts with w4a8"):
+        getter()
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")

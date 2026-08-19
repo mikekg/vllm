@@ -238,6 +238,7 @@ def select_nvfp4_moe_backend(
         if use_batched
         else mk.FusedMoEActivationFormat.Standard
     )
+    force_hybrid = envs.VLLM_NVFP4_FORCE_HYBRID
 
     def _make_log_backend(backend: NvFp4MoeBackend):
         available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]
@@ -274,6 +275,31 @@ def select_nvfp4_moe_backend(
                 return backend, k_cls
 
         raise ValueError(_make_log_unsupported(backend, reason))
+
+    if force_hybrid == "w4a16":
+        backend = NvFp4MoeBackend.MARLIN
+        return _return_or_raise(
+            backend, config, weight_key, activation_key, activation_format
+        )
+
+    if force_hybrid == "w4a8":
+        backend = NvFp4MoeBackend.MARLIN_FP8_BYCOPY
+        if backend in AVAILABLE_BACKENDS:
+            for k_cls in backend_to_kernel_cls(backend):
+                supported, _ = k_cls.is_supported_config(
+                    k_cls,
+                    config,
+                    weight_key,
+                    activation_key,
+                    activation_format,
+                )
+                if supported:
+                    logger.info_once(_make_log_backend(backend))
+                    return backend, k_cls
+        logger.warning_once(
+            "VLLM_NVFP4_FORCE_HYBRID=w4a8 is ineligible for this MoE "
+            "configuration; using normal safe fallback selection."
+        )
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend

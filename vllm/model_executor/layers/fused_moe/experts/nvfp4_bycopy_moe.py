@@ -7,8 +7,10 @@ from typing import cast
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -60,6 +62,7 @@ from vllm.v1.worker.workspace import reserve_workspace_for_all_ubatches
 
 MoeShape = tuple[int, int, int, int, bool]
 _FP8_BLOCK_SHAPE = [128, 128]
+logger = init_logger(__name__)
 
 
 def _moe_shape(moe_config: FusedMoEConfig) -> MoeShape:
@@ -649,6 +652,14 @@ class NvFp4ByCopyExperts(FallbackExperts):
             moe_config.in_dtype,
             shape,
         )
+        if envs.VLLM_NVFP4_FORCE_HYBRID == "w4a8":
+            if self.m_knee is not None:
+                self.m_knee = self.triton_m_knee
+            logger.warning(
+                "VLLM_NVFP4_FORCE_HYBRID=w4a8 resolved MoE M knee=%d; "
+                "M below the knee and hard-ineligible shapes remain W4A16.",
+                self.triton_m_knee,
+            )
         self.marlin_workspace: torch.Tensor | None = None
         self.w13_fp8_scale_divisor_code: torch.Tensor | None = None
         self.w2_fp8_scale_divisor_code: torch.Tensor | None = None

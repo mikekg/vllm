@@ -25,6 +25,7 @@ from vllm.model_executor.kernels.linear import (
     HummingNvFp4LinearKernel,
     MarlinNvFp4LinearKernel,
     MarlinNvFp4ToFp8LinearKernel,
+    init_nvfp4_linear_kernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4 import marlin_fp8
 from vllm.model_executor.kernels.linear.nvfp4.marlin_fp8 import (
@@ -707,6 +708,30 @@ def test_modelopt_linear_exposes_humming_layer_attrs(dist_init, monkeypatch):
     assert linear.has_bias is True
 
 
+@pytest.mark.parametrize(
+    ("mode", "kernel_cls"),
+    [
+        ("w4a8", MarlinNvFp4ToFp8LinearKernel),
+        ("w4a16", MarlinNvFp4LinearKernel),
+    ],
+)
+def test_nvfp4_force_hybrid_selects_dense_kernel(monkeypatch, mode, kernel_cls):
+    monkeypatch.setenv("VLLM_NVFP4_FORCE_HYBRID", mode)
+    monkeypatch.delenv("VLLM_TEST_FORCE_FP8_MARLIN", raising=False)
+    monkeypatch.delenv("VLLM_DISABLED_KERNELS", raising=False)
+    with (
+        patch.object(
+            MarlinNvFp4ToFp8LinearKernel,
+            "is_supported",
+            return_value=(True, None),
+        ),
+        patch.object(
+            MarlinNvFp4LinearKernel, "is_supported", return_value=(True, None)
+        ),
+    ):
+        assert isinstance(init_nvfp4_linear_kernel(use_a16=True), kernel_cls)
+
+
 def test_nvfp4_bycopy_layer_filter():
     embedding = Mock(spec=VocabParallelEmbedding)
     embedding.__class__ = VocabParallelEmbedding
@@ -740,7 +765,9 @@ def test_nvfp4_bycopy_production_selection_stays_hopper_only():
     )
 
 
-def test_nvfp4_bycopy_clamps_knee_without_weight_cache(monkeypatch):
+def test_nvfp4_bycopy_clamps_knee_without_weight_cache(monkeypatch, caplog):
+    monkeypatch.delenv("VLLM_NVFP4_FORCE_HYBRID", raising=False)
+    monkeypatch.delenv("VLLM_TEST_FORCE_FP8_MARLIN", raising=False)
     with patch.object(
         MarlinNvFp4ToFp8LinearKernel,
         "is_supported",
@@ -772,6 +799,20 @@ def test_nvfp4_bycopy_clamps_knee_without_weight_cache(monkeypatch):
     assert kernel.m_knee == 513
     assert not hasattr(layer, "_nvfp4_fp8_weight")
     assert not hasattr(layer, "_nvfp4_fp8_weight_scale")
+
+    caplog.clear()
+    monkeypatch.setenv("VLLM_NVFP4_FORCE_HYBRID", "w4a8")
+    kernel.process_weights_after_loading(layer)
+    kernel.process_weights_after_loading(layer)
+    assert kernel.m_knee == 513
+    assert sum("resolved dense M knee=513" in r.message for r in caplog.records) == 1
+
+    monkeypatch.setattr(marlin_fp8, "marlin_repacked_nk", lambda *args: (129, 128))
+    kernel.process_weights_after_loading(layer)
+    assert kernel.m_knee is None
+    kernel.marlin.apply_weights = Mock(return_value=torch.empty((1, 128)))
+    kernel.apply_weights(layer, torch.empty((1, 128)))
+    kernel.marlin.apply_weights.assert_called_once()
 
 
 def test_nvfp4_bycopy_uses_native_hybrid_op(monkeypatch):

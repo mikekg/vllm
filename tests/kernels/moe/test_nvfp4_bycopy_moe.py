@@ -88,6 +88,21 @@ def test_universal_knees_and_three_way_selection():
     assert experts._select_non_native_experts(4097) is deepgemm
 
 
+def test_force_w4a8_uses_generic_moe_knee(monkeypatch, caplog):
+    monkeypatch.setenv("VLLM_NVFP4_FORCE_HYBRID", "w4a8")
+    monkeypatch.delenv("VLLM_TEST_FORCE_FP8_MARLIN", raising=False)
+    scale = torch.ones(())
+    experts = NvFp4ByCopyExperts(
+        _config(e=2, p=128, k=128, topk=1),
+        nvfp4_w4a16_moe_quant_config(scale, scale, scale, scale),
+    )
+
+    assert (experts.triton_m_knee, experts.m_knee) == (320, 320)
+    assert experts._select_non_native_experts(319) is experts.fallback_experts
+    assert experts._select_non_native_experts(320) is experts.experts
+    assert sum("resolved MoE M knee=320" in r.message for r in caplog.records) == 1
+
+
 @pytest.mark.parametrize(
     ("m", "backend"),
     [(159, "marlin"), (160, "triton"), (256, "triton"), (257, "triton")],
@@ -411,6 +426,41 @@ def test_internal_oracle_backend_precedes_marlin(monkeypatch):
     )
     with pytest.raises(ValueError):
         nvfp4_oracle.map_nvfp4_backend("marlin_fp8_bycopy")
+
+
+@pytest.mark.parametrize(
+    ("mode", "bycopy_supported", "expected"),
+    [
+        ("w4a8", True, nvfp4_oracle.NvFp4MoeBackend.MARLIN_FP8_BYCOPY),
+        ("w4a8", False, nvfp4_oracle.NvFp4MoeBackend.MARLIN),
+        ("w4a16", True, nvfp4_oracle.NvFp4MoeBackend.MARLIN),
+    ],
+)
+def test_force_hybrid_oracle_modes(monkeypatch, mode, bycopy_supported, expected):
+    monkeypatch.setenv("VLLM_NVFP4_FORCE_HYBRID", mode)
+    monkeypatch.delenv("VLLM_TEST_FORCE_FP8_MARLIN", raising=False)
+    monkeypatch.delenv("VLLM_DISABLED_KERNELS", raising=False)
+
+    class Support:
+        @staticmethod
+        def is_supported_config(*args, **kwargs):
+            return True, None
+
+    class Reject:
+        @staticmethod
+        def is_supported_config(*args, **kwargs):
+            return False, "test rejection"
+
+    def classes(backend):
+        if backend == nvfp4_oracle.NvFp4MoeBackend.MARLIN_FP8_BYCOPY:
+            return [Support if bycopy_supported else Reject]
+        if backend == nvfp4_oracle.NvFp4MoeBackend.MARLIN:
+            return [Support]
+        return [Reject]
+
+    monkeypatch.setattr(nvfp4_oracle, "backend_to_kernel_cls", classes)
+    backend, _ = nvfp4_oracle.select_nvfp4_moe_backend(_config(), kNvfp4Static, None)
+    assert backend == expected
 
 
 @pytest.mark.parametrize(

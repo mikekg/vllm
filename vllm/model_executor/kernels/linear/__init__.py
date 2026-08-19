@@ -1032,6 +1032,7 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     # back to emulation. It overrides --linear-backend.
     force_kernel: type[NvFp4LinearKernel] | None = None
     linear_backend = _get_linear_backend()
+    force_hybrid = envs.VLLM_NVFP4_FORCE_HYBRID
     if envs.VLLM_BATCH_INVARIANT:
         bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
         if bi_supported:
@@ -1061,6 +1062,15 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
                 reason,
             )
             force_kernel = EmulationNvFp4LinearKernel
+    elif use_a16 and force_hybrid == "w4a16":
+        force_kernel = MarlinNvFp4LinearKernel
+    elif use_a16 and force_hybrid == "w4a8":
+        supported, _ = MarlinNvFp4ToFp8LinearKernel.is_supported()
+        if (
+            supported
+            and MarlinNvFp4ToFp8LinearKernel.__name__ not in envs.VLLM_DISABLED_KERNELS
+        ):
+            force_kernel = MarlinNvFp4ToFp8LinearKernel
     elif linear_backend == "auto" and use_a16:
         _cc = current_platform.get_device_capability()
         compute_capability = _cc.to_int() if _cc is not None else None

@@ -3,8 +3,10 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config_or_none
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
     marlin_pad_dim,
@@ -16,6 +18,8 @@ from vllm.platforms import current_platform
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 from .marlin import MarlinNvFp4LinearKernel
+
+logger = init_logger(__name__)
 
 
 def _is_nvfp4_bycopy_layer(layer: torch.nn.Module) -> bool:
@@ -39,6 +43,7 @@ class MarlinNvFp4ToFp8LinearKernel(NvFp4LinearKernel):
         self.resident_k = 0
         self.use_atomic_add = False
         self.use_fp32_reduce = USE_FP32_REDUCE_DEFAULT
+        self._force_warning_emitted = False
 
     @classmethod
     def is_supported(
@@ -74,9 +79,15 @@ class MarlinNvFp4ToFp8LinearKernel(NvFp4LinearKernel):
             and self.padded_n % 128 == 0
             and self.resident_k % 128 == 0
         )
-        self.m_knee = 1 if _is_nvfp4_bycopy_layer(layer) and aligned else None
-
         vllm_config = get_current_vllm_config_or_none()
+        resolved_m_knee = (
+            (vllm_config.compilation_config.max_cudagraph_capture_size or 0) + 1
+            if vllm_config is not None
+            else 1
+        )
+        self.m_knee = (
+            resolved_m_knee if _is_nvfp4_bycopy_layer(layer) and aligned else None
+        )
         if self.m_knee is not None:
             self.use_atomic_add = should_use_atomic_add_reduce(
                 m=1,
@@ -85,12 +96,13 @@ class MarlinNvFp4ToFp8LinearKernel(NvFp4LinearKernel):
                 device=layer.weight.device,
                 dtype=layer.params_dtype,
             )
-            if vllm_config is not None:
-                self.m_knee = max(
-                    self.m_knee,
-                    (vllm_config.compilation_config.max_cudagraph_capture_size or 0)
-                    + 1,
-                )
+        if envs.VLLM_NVFP4_FORCE_HYBRID == "w4a8" and not self._force_warning_emitted:
+            logger.warning(
+                "VLLM_NVFP4_FORCE_HYBRID=w4a8 resolved dense M knee=%d; "
+                "M below the knee and hard-ineligible shapes remain W4A16.",
+                resolved_m_knee,
+            )
+            self._force_warning_emitted = True
 
     def _marlin_bias(
         self, layer: torch.nn.Module, bias: torch.Tensor | None

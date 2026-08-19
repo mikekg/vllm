@@ -17,7 +17,7 @@ source "$1"
 : "${PYTHON:?}"
 : "${CUDA_HOME:?}"
 
-[[ -f $CUDA_HOME/include/cuda/std/cstdint ]]
+[[ -f $CUDA_HOME/include/cccl/cuda/std/cstdint ]]
 [[ -f $CUDA_HOME/include/cuda_bf16.h ]]
 [[ -x $CUDA_HOME/bin/cuobjdump ]]
 
@@ -36,6 +36,7 @@ RUNTIME_CACHE=$(mktemp -d \
   "$SCRATCH/w4a8-${SLURM_JOB_ID}-${NODE_RANK}.XXXXXX")
 mkdir -p "$RESULT_DIR"
 export TMPDIR="$RUNTIME_CACHE/tmp"
+export HOME="$RUNTIME_CACHE/home"
 export XDG_CACHE_HOME="$RUNTIME_CACHE/xdg-cache"
 export XDG_CONFIG_HOME="$RUNTIME_CACHE/xdg-config"
 export HF_HOME="$RUNTIME_CACHE/huggingface"
@@ -50,7 +51,7 @@ export DG_JIT_CACHE_DIR="$RUNTIME_CACHE/deep_gemm"
 export VLLM_ENGINE_READY_TIMEOUT_S=${VLLM_ENGINE_READY_TIMEOUT_S:-1800}
 export VLLM_NO_USAGE_STATS=1
 mkdir -p \
-  "$TMPDIR" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$HF_HOME" \
+  "$TMPDIR" "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$HF_HOME" \
   "$TRITON_CACHE_DIR" "$CUDA_CACHE_PATH" "$TORCHINDUCTOR_CACHE_DIR" \
   "$FLASHINFER_WORKSPACE_BASE" "$VLLM_CACHE_ROOT" \
   "$VLLM_CONFIG_ROOT" "$VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR" \

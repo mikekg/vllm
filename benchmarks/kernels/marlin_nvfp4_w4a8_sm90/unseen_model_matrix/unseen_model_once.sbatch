@@ -24,4 +24,5 @@ source "$config"
 
 LD_PRELOAD= LD_LIBRARY_PATH= PYTHONPATH= \
   "$srun" --container-image="$IMAGE" --container-mounts="$MOUNTS" \
-  --no-container-entrypoint bash "$SCRIPTS/$RUN_SCRIPT" "$config"
+  --no-container-mount-home --no-container-entrypoint \
+  bash "$SCRIPTS/$RUN_SCRIPT" "$config"

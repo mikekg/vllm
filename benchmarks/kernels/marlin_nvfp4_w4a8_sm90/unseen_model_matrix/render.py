@@ -222,6 +222,8 @@ def header(
             f"{site}/_C_stable_libtorch.abi3.so",
             f"{site}/_moe_C_stable_libtorch.abi3.so",
             f"{site}/third_party/deep_gemm/_C.cpython-312-x86_64-linux-gnu.so",
+            f"{site}/vllm_flash_attn/_vllm_fa2_C.abi3.so",
+            f"{site}/vllm_flash_attn/_vllm_fa3_C.abi3.so",
         ]
         flashinfer_packages = [
             f"{package_site}/flashinfer_python-0.6.16.post3.dist-info",

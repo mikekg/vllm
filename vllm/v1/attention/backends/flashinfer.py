@@ -470,7 +470,10 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_sliding_window(cls) -> bool:
-        return True
+        # FlashInfer prefill for sliding-window layers is unsafe on SM90.
+        # Exclude it during auto-selection instead of failing later while
+        # constructing metadata builders.
+        return not current_platform.is_device_capability(90)
 
     @staticmethod
     def get_impl_cls() -> type["FlashInferImpl"]:

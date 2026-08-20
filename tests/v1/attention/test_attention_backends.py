@@ -69,6 +69,23 @@ except ImportError:
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHINFER)
 
 
+@pytest.mark.parametrize(
+    ("is_sm90", "supported"),
+    [(True, False), (False, True)],
+)
+def test_flashinfer_sliding_window_device_support(monkeypatch, is_sm90, supported):
+    if AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST:
+        pytest.skip("FlashInfer is not installed")
+
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability",
+        lambda capability: is_sm90 and capability == 90,
+    )
+    backend = AttentionBackendEnum.FLASHINFER.get_class()
+    assert backend.supports_sliding_window() is supported
+
+
 def _convert_dtype_to_torch(dtype):
     """Convert ModelDType to torch.dtype."""
     if isinstance(dtype, str):

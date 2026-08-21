@@ -335,6 +335,11 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         # to prevent invalid grid configuration during graph capture.
         max_seqlen_q = max(attn_metadata.decode.max_query_len, 1)
 
+        # FA3 requires positive CP values even when DCP is disabled. Keep the
+        # non-DCP path valid if a caller reaches decode before DCP is initialized.
+        dcp_world_size = max(self.dcp_world_size, 1)
+        dcp_rank = self.dcp_rank if self.dcp_world_size > 0 else 0
+
         attn_out = flash_attn_varlen_func(
             q=q_pe,
             k=k_pe_cache.unsqueeze(-2),  # Add head dim of 1
@@ -351,8 +356,8 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             fa_version=3,  # only version 3 is supported
             scheduler_metadata=attn_metadata.decode.scheduler_metadata,
             num_splits=attn_metadata.decode.max_num_splits,
-            cp_world_size=self.dcp_world_size,
-            cp_rank=self.dcp_rank,
+            cp_world_size=dcp_world_size,
+            cp_rank=dcp_rank,
             cp_tot_seqused_k=attn_metadata.decode.dcp_tot_seq_lens,
         )
 

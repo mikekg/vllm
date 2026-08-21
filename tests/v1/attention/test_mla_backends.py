@@ -1067,6 +1067,52 @@ def test_flashinfer_mla_dspark_dcp_supports_target_and_draft(monkeypatch):
     assert backend.supports_non_causal_dcp()
 
 
+@pytest.mark.skip_global_cleanup
+def test_flashattn_mla_defaults_uninitialized_dcp_to_single_rank(monkeypatch):
+    flashattn_mla_module = pytest.importorskip(
+        "vllm.v1.attention.backends.mla.flashattn_mla", exc_type=ImportError
+    )
+    decode_call = None
+
+    def fake_decode(**kwargs):
+        nonlocal decode_call
+        decode_call = kwargs
+        return torch.empty_like(kwargs["q_v"])
+
+    monkeypatch.setattr(flashattn_mla_module, "flash_attn_varlen_func", fake_decode)
+
+    impl = object.__new__(flashattn_mla_module.FlashAttnMLAImpl)
+    impl.dcp_world_size = -1
+    impl.dcp_rank = -1
+    impl.kv_cache_dtype = "bfloat16"
+    impl.kv_lora_rank = 4
+    impl.qk_rope_head_dim = 2
+    impl.scale = 1.0
+    impl.need_to_return_lse_for_decode = False
+
+    decode = SimpleNamespace(
+        max_query_len=1,
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        max_seq_len=1,
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        block_table=torch.tensor([[0]], dtype=torch.int32),
+        scheduler_metadata=None,
+        max_num_splits=1,
+        dcp_tot_seq_lens=None,
+    )
+
+    impl.forward_mqa(
+        (torch.empty(1, 2, 4), torch.empty(1, 2, 2)),
+        torch.empty(1, 1, 6),
+        SimpleNamespace(decode=decode),
+        SimpleNamespace(),
+    )
+
+    assert decode_call is not None
+    assert decode_call["cp_world_size"] == 1
+    assert decode_call["cp_rank"] == 0
+
+
 @pytest.mark.parametrize(
     ("causal", "tokens_per_decode", "dcp_world_size", "dcp_rank"),
     [

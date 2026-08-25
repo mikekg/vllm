@@ -37,8 +37,8 @@ class DeepseekV4FP8Config(Fp8Config):
       experts with float32 FP8 linear scales.
 
     The dispatch and the linear scale dtype are both keyed off
-    ``expert_dtype`` from the model's hf_config; missing values default
-    to ``"fp4"`` so existing FP4 checkpoints stay unchanged.
+    ``expert_dtype`` from the model's hf_config. Standard FP8 checkpoints
+    may omit it; FP4 checkpoints declare ``expert_dtype="fp4"`` explicitly.
 
     NOTE: ``expert_dtype`` is resolved lazily because this config is
     constructed during VllmConfig setup, before ``set_current_vllm_config``
@@ -63,7 +63,7 @@ class DeepseekV4FP8Config(Fp8Config):
                 # vllm_config not yet set; defer the decision until a
                 # later call lands inside set_current_vllm_config.
                 return "fp4"
-            expert_dtype = getattr(hf_config, "expert_dtype", "fp4")
+            expert_dtype = getattr(hf_config, "expert_dtype", "fp8")
             if expert_dtype not in _DEEPSEEK_V4_EXPERT_DTYPES:
                 raise ValueError(
                     f"Unsupported DeepSeek V4 expert_dtype={expert_dtype!r}; "

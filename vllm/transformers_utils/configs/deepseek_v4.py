@@ -24,6 +24,7 @@ class DeepseekV4Config(PretrainedConfig):
         vision_max_n_token: int = 384,
         vision_min_pixels: int = 147456,
         vision_max_wh_ratio: float = 8,
+        expert_dtype: str = "fp8",
         **kwargs,
     ):
         self.max_position_embeddings = max_position_embeddings
@@ -49,4 +50,5 @@ class DeepseekV4Config(PretrainedConfig):
         # IMAGE_END]; the mm placeholder additionally carries a leading
         # compressor-alignment pad (see mm_preprocess.COMPRESS_PAD_TO).
         self.mm_prefix_span_leading_pad_modulus = 4 if vision_n_layers > 0 else 0
+        self.expert_dtype = expert_dtype
         super().__init__(**kwargs)

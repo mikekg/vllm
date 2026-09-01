@@ -7,11 +7,12 @@ import ast
 import hashlib
 import json
 import os
-import re
 import sys
 import time
 from collections import Counter
 from pathlib import Path
+
+import regex as re
 
 VARIANTS = {
     "marlin": {
@@ -390,7 +391,7 @@ params = SamplingParams(
 )
 profile = os.environ.get("S39_PROFILE", "0") == "1"
 native_events = {}
-torch.cuda.synchronize()
+torch.accelerator.synchronize()
 start = time.perf_counter()
 if profile:
     with torch.profiler.profile(
@@ -407,7 +408,7 @@ if profile:
     }
 else:
     outputs = llm.generate(prompts, params, use_tqdm=True)
-torch.cuda.synchronize()
+torch.accelerator.synchronize()
 elapsed = time.perf_counter() - start
 
 records = []

@@ -5,6 +5,7 @@
 set -euo pipefail
 
 : "${1:?generated environment file required}"
+# shellcheck source=/dev/null
 source "$1"
 
 : "${MODEL_PATH:?}"
@@ -191,7 +192,7 @@ for c in "${concurrencies[@]}"; do
     --request-rate inf
     --ignore-eos
     --num-warmups "$((2 * c))"
-    --percentile-metrics ttft,tpot,itl,e2el
+    --percentile-metrics "ttft,tpot,itl,e2el"
     --save-detailed
     --save-result
     --result-dir "$RESULT_DIR"

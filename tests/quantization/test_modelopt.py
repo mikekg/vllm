@@ -650,8 +650,7 @@ def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
             bycopy_ok, _ = MarlinNvFp4ToFp8LinearKernel.is_supported()
             if (
                 not bycopy_ok
-                or MarlinNvFp4ToFp8LinearKernel.__name__
-                in envs.VLLM_DISABLED_KERNELS
+                or MarlinNvFp4ToFp8LinearKernel.__name__ in envs.VLLM_DISABLED_KERNELS
             ):
                 kernel_cls = MarlinNvFp4LinearKernel
     else:

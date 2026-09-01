@@ -87,7 +87,7 @@ for concurrency in "${concurrencies[@]}"; do
       --num-warmups "$((2 * concurrency))"
       --temperature 0
       --ignore-eos
-      --percentile-metrics ttft,tpot,itl,e2el
+      --percentile-metrics "ttft,tpot,itl,e2el"
       --save-result
       --save-detailed
       --result-dir "$RUN_DIR"

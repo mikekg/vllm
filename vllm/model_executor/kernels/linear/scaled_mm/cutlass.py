@@ -166,6 +166,8 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
             return False, "requires CUDA."
+        if compute_capability is not None and compute_capability < 89:
+            return False, "requires compute capability 8.9 or higher."
         return True, None
 
     @classmethod

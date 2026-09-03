@@ -58,6 +58,17 @@ def _finite_fp8_bytes() -> torch.Tensor:
     return torch.tensor(vals, dtype=torch.uint8, device="cuda")
 
 
+def _assert_code_ulp(actual_u8: torch.Tensor, ref_u8: torch.Tensor, max_ulp: int):
+    a = actual_u8.to(torch.int32)
+    r = ref_u8.to(torch.int32)
+    sign_a, sign_r = a & 0x80, r & 0x80
+    mag_a, mag_r = a & 0x7F, r & 0x7F
+    sign_ok = (sign_a == sign_r) | ((mag_a == 0) & (mag_r == 0))
+    assert bool(sign_ok.all()), "sign mismatch in truncating encode"
+    ulp = (mag_a - mag_r).abs()
+    assert int(ulp.max()) <= max_ulp, f"max fp8-code ULP {int(ulp.max())} > {max_ulp}"
+
+
 def _run_decode(x_u8: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     out = torch.empty(x_u8.numel(), dtype=dtype, device="cuda")
     n = x_u8.numel()
@@ -118,8 +129,7 @@ def test_encode_matches_reference(
     if exact:
         torch.testing.assert_close(actual.float(), ref.float(), atol=0.0, rtol=0.0)
     else:
-        # Truncation: within 2 fp8-code ULP -> bounded relative error after decode.
-        torch.testing.assert_close(actual.float(), ref.float(), atol=0.0, rtol=0.30)
+        _assert_code_ulp(actual.view(torch.uint8), ref.view(torch.uint8), max_ulp=2)
 
 
 @pytest.mark.skipif(

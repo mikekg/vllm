@@ -40,6 +40,7 @@ def _make_shared_experts(
         SimpleNamespace(moe_parallel_config=parallel_config),
         enable_dbo=False,
         mk_can_overlap_shared_experts=lambda: mk_overlap,
+        is_multistream_safe=lambda: True,
     )
 
 

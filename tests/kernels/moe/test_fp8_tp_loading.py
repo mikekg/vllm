@@ -164,6 +164,9 @@ def test_fp8_block_aligned_tp_preserves_checkpoint(
 @pytest.mark.parametrize("backend", ["auto", "triton"])
 @pytest.mark.parametrize("tp_size,block", [(2, 64), (4, 32)])
 def test_fp8_tp_default_keeps_refined_layout(monkeypatch, backend, tp_size, block):
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "supports_fp8", lambda: True)
     layer = _make_fp8_tp_experts(monkeypatch, tp_size, 0, backend)
     assert layer.moe_config.intermediate_size_per_partition == 640 // tp_size
     assert layer.quant_method.moe_block_shape == [block, block]
@@ -317,12 +320,14 @@ def test_fp8_block_aligned_tp_flashinfer_matches_unsharded(
 @pytest.mark.parametrize("format", ["bf16", "nvfp4"])
 @pytest.mark.parametrize("batched", [False, True])
 def test_uneven_tp_preserves_packed_and_unquantized_checkpoint(
-    monkeypatch, format, batched
+    monkeypatch, format, batched, default_vllm_config
 ):
     """TP24 covers every channel once and clears padding on reload."""
+    from vllm.model_executor import parameter
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
     from vllm.model_executor.layers.quantization import modelopt
 
+    monkeypatch.setattr(parameter, "get_tensor_model_parallel_rank", lambda: 0)
     n, h, tp = 2048, 256, 24
     if format == "nvfp4":
         monkeypatch.setattr(

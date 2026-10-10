@@ -908,6 +908,7 @@ class RoutedExperts(PluggableLayer):
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
                     tp_rank=self.moe_config.tp_rank,
+                    is_scale="scale" in weight_name,
                 )
             return True if return_success else None
 

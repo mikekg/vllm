@@ -328,6 +328,7 @@ def test_uneven_tp_preserves_packed_and_unquantized_checkpoint(
     from vllm.model_executor.layers.quantization import modelopt
 
     monkeypatch.setattr(parameter, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(parameter, "get_tensor_model_parallel_world_size", lambda: 24)
     n, h, tp = 2048, 256, 24
     if format == "nvfp4":
         monkeypatch.setattr(

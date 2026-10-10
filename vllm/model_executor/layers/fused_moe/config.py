@@ -1338,8 +1338,15 @@ class FusedMoEConfig:
         from vllm._aiter_ops import rocm_aiter_ops
 
         tp_size = self.moe_parallel_config.tp_size
-        assert self.intermediate_size % tp_size == 0
-        self.intermediate_size_per_partition = self.intermediate_size // tp_size
+        if self.intermediate_size % tp_size:
+            assert self.ep_size == 1 and not self.is_lora_enabled and not self.has_bias
+            # Keep packed weights and 128-wide checkpoint scale blocks rank-local.
+            self.intermediate_size_per_partition = (
+                cdiv(self.intermediate_size, tp_size * 128) * 128
+            )
+            self.tp_shard_with_padding = True
+        else:
+            self.intermediate_size_per_partition = self.intermediate_size // tp_size
 
         if self.dp_size > 1:
             logger.debug_once(

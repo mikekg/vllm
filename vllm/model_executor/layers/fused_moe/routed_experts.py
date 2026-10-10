@@ -444,13 +444,23 @@ class RoutedExperts(PluggableLayer):
             )
             expert_data.copy_(loaded_weight)
         elif shard_id in ("w1", "w3"):
-            self._load_w13(
-                shard_id=shard_id,
-                shard_dim=shard_dim,
-                loaded_weight=loaded_weight,
-                expert_data=expert_data,
-                tp_rank=tp_rank,
-            )
+            if self.moe_config.tp_shard_with_padding:
+                self._load_model_weight_or_group_weight_scale(
+                    shard_dim,
+                    expert_data,
+                    shard_id,
+                    loaded_weight,
+                    tp_rank,
+                    is_scale=True,
+                )
+            else:
+                self._load_w13(
+                    shard_id=shard_id,
+                    shard_dim=shard_dim,
+                    loaded_weight=loaded_weight,
+                    expert_data=expert_data,
+                    tp_rank=tp_rank,
+                )
 
     @staticmethod
     def _get_hidden_dim(shard_dim: int, ndim: int) -> int:

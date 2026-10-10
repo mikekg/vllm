@@ -317,20 +317,22 @@ def test_fp8_block_aligned_tp_flashinfer_matches_unsharded(
         assert relative_l2 < 0.01, relative_l2.item()
 
 
-@pytest.mark.parametrize("format", ["bf16", "nvfp4"])
+@pytest.mark.parametrize("format,tp_size", [("bf16", 24), ("nvfp4", 24), ("nvfp4", 8)])
 @pytest.mark.parametrize("batched", [False, True])
 @pytest.mark.parametrize("intermediate_size", [1856, 2048])
 def test_uneven_tp_preserves_packed_and_unquantized_checkpoint(
-    monkeypatch, format, batched, intermediate_size, default_vllm_config
+    monkeypatch, format, tp_size, batched, intermediate_size, default_vllm_config
 ):
-    """TP24 covers every channel once and clears padding on reload."""
+    """Uneven and quantization-aligned shards preserve every checkpoint channel."""
     from vllm.model_executor import parameter
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
     from vllm.model_executor.layers.quantization import modelopt
 
     monkeypatch.setattr(parameter, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(parameter, "get_tensor_model_parallel_world_size", lambda: 24)
-    n, h, tp = intermediate_size, 256, 24
+    monkeypatch.setattr(
+        parameter, "get_tensor_model_parallel_world_size", lambda: tp_size
+    )
+    n, h, tp = intermediate_size, 256, tp_size
     if format == "nvfp4":
         monkeypatch.setattr(
             modelopt,
@@ -393,7 +395,9 @@ def test_uneven_tp_preserves_packed_and_unquantized_checkpoint(
             quant_config=quant_config,
         )
         width = layer.moe_config.intermediate_size_per_partition
-        assert width == 128
+        assert width == (
+            128 if tp_size == 24 else (intermediate_size // tp_size + 15) // 16 * 16
+        )
         valid = max(0, min(width, n - rank * width))
         for name, items in checkpoints.items():
             prefix = "w2" if name == "w2" else "w13"

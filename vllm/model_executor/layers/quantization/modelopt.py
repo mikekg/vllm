@@ -23,6 +23,7 @@ from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
@@ -880,6 +881,26 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
+
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
+            hidden_size, intermediate_size_per_partition, act_dtype, moe_parallel_config
+        )
+        group_size = self.quant_config.group_size
+        aligned_intermediate_size = (
+            (intermediate_size_per_partition + group_size - 1)
+            // group_size
+            * group_size
+        )
+        if aligned_intermediate_size != intermediate_size_per_partition:
+            self.moe.tp_shard_with_padding = True
+        return hidden_size, aligned_intermediate_size
 
     def uses_weight_scale_2_pattern(self) -> bool:
         """FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales."""

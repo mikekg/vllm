@@ -319,8 +319,9 @@ def test_fp8_block_aligned_tp_flashinfer_matches_unsharded(
 
 @pytest.mark.parametrize("format", ["bf16", "nvfp4"])
 @pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("intermediate_size", [1856, 2048])
 def test_uneven_tp_preserves_packed_and_unquantized_checkpoint(
-    monkeypatch, format, batched, default_vllm_config
+    monkeypatch, format, batched, intermediate_size, default_vllm_config
 ):
     """TP24 covers every channel once and clears padding on reload."""
     from vllm.model_executor import parameter
@@ -329,7 +330,7 @@ def test_uneven_tp_preserves_packed_and_unquantized_checkpoint(
 
     monkeypatch.setattr(parameter, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(parameter, "get_tensor_model_parallel_world_size", lambda: 24)
-    n, h, tp = 2048, 256, 24
+    n, h, tp = intermediate_size, 256, 24
     if format == "nvfp4":
         monkeypatch.setattr(
             modelopt,

@@ -55,9 +55,9 @@ def _make_fp8_tp_experts(
     config.routing_method = RoutingMethodType.RenormalizeNaive
     config.moe_parallel_config.tp_size = tp_size
     config.moe_parallel_config.tp_rank = tp_rank
-    config.intermediate_size_per_partition = intermediate_size // tp_size
-    config.intermediate_size_per_partition_unpadded = intermediate_size // tp_size
     config.moe_backend = backend
+    config.intermediate_size_per_partition_unpadded = None
+    config.__post_init__()
     for field, value in (config_overrides or {}).items():
         setattr(config, field, value)
     return RoutedExperts(
@@ -77,11 +77,14 @@ def _make_fp8_tp_experts(
     )
 
 
-@pytest.mark.parametrize("tp_size", [2, 4, 8])
+@pytest.mark.parametrize(
+    "tp_size,intermediate_size,backend",
+    [(tp, size, "flashinfer_trtllm") for tp in (2, 4, 8) for size in (640, 896)]
+    + [(24, 2048, "marlin")],
+)
 @pytest.mark.parametrize("batched", [False, True])
-@pytest.mark.parametrize("intermediate_size", [640, 896])
 def test_fp8_block_aligned_tp_preserves_checkpoint(
-    monkeypatch, tp_size, batched, intermediate_size
+    monkeypatch, tp_size, batched, intermediate_size, backend
 ):
     """All ranks reconstruct the original dequantized projections, including
     padding-only ranks. Reloading must clear stale weights and scales.
@@ -107,7 +110,7 @@ def test_fp8_block_aligned_tp_preserves_checkpoint(
     num_blocks = intermediate_size // 128
     for rank in range(tp_size):
         layer = _make_fp8_tp_experts(
-            monkeypatch, tp_size, rank, intermediate_size=intermediate_size
+            monkeypatch, tp_size, rank, backend, intermediate_size=intermediate_size
         )
         assert layer.quant_method.weight_scale_refine is None
         assert layer.quant_method.moe_block_shape == [128, 128]
@@ -309,3 +312,118 @@ def test_fp8_block_aligned_tp_flashinfer_matches_unsharded(
             f"unsharded_fi_vs_triton_l2={cross_backend_l2.item():.6f}"
         )
         assert relative_l2 < 0.01, relative_l2.item()
+
+
+@pytest.mark.parametrize("format", ["bf16", "nvfp4"])
+@pytest.mark.parametrize("batched", [False, True])
+def test_uneven_tp_preserves_packed_and_unquantized_checkpoint(
+    monkeypatch, format, batched
+):
+    """TP24 covers every channel once and clears padding on reload."""
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+    from vllm.model_executor.layers.quantization import modelopt
+
+    n, h, tp = 2048, 256, 24
+    if format == "nvfp4":
+        monkeypatch.setattr(
+            modelopt,
+            "select_nvfp4_moe_backend",
+            lambda **kwargs: (NvFp4MoeBackend.MARLIN, None),
+        )
+        quant_config = modelopt.ModelOptNvFp4Config(
+            quant_method="W4A16_NVFP4", is_checkpoint_nvfp4_serialized=True
+        )
+        dtype, packing = torch.uint8, 2
+    else:
+        quant_config = Fp8Config(
+            is_checkpoint_fp8_serialized=True,
+            ignored_layers=["model.layers.0.mlp.experts"],
+        )
+        dtype, packing = torch.bfloat16, 1
+    weights = {
+        "w1": torch.arange(2 * n * h // packing)
+        .remainder(127)
+        .to(dtype)
+        .reshape(2, n, h // packing),
+        "w3": torch.arange(2 * n * h // packing)
+        .remainder(119)
+        .to(dtype)
+        .reshape(2, n, h // packing),
+        "w2": torch.arange(2 * h * n // packing)
+        .remainder(113)
+        .to(dtype)
+        .reshape(2, h, n // packing),
+    }
+    checkpoints = {
+        name: [("weight", w, packing if name == "w2" else 1, False)]
+        for name, w in weights.items()
+    }
+    if format == "nvfp4":
+        for name in weights:
+            shape = (2, h, n // 16) if name == "w2" else (2, n, h // 16)
+            scale = (
+                torch.arange(torch.tensor(shape).prod().item())
+                .remainder(7)
+                .add(1)
+                .reshape(shape)
+                .to(torch.float8_e4m3fn)
+            )
+            checkpoints[name].append(
+                ("weight_scale", scale, 16 if name == "w2" else 1, True)
+            )
+    reconstructed: dict[tuple[str, str], list[torch.Tensor]] = {
+        (name, suffix): []
+        for name, items in checkpoints.items()
+        for suffix, _, _, _ in items
+    }
+    for rank in range(tp):
+        layer = _make_fp8_tp_experts(
+            monkeypatch,
+            tp,
+            rank,
+            "marlin" if format == "nvfp4" else "triton",
+            intermediate_size=n,
+            quant_config=quant_config,
+        )
+        width = layer.moe_config.intermediate_size_per_partition
+        assert width == 128
+        valid = max(0, min(width, n - rank * width))
+        for name, items in checkpoints.items():
+            prefix = "w2" if name == "w2" else "w13"
+            dim = 2 if name == "w2" else 1
+            for suffix, checkpoint, divisor, is_scale in items:
+                param_name = f"{prefix}_{suffix}"
+                param = getattr(layer, param_name)
+                for _ in range(2):
+                    if name != "w3":
+                        param.data.fill_(7)
+                    if batched:
+                        assert param.weight_loader(
+                            param, checkpoint, param_name, name, 0, return_success=True
+                        )
+                    else:
+                        for expert in range(2):
+                            assert param.weight_loader(
+                                param,
+                                checkpoint[expert],
+                                param_name,
+                                name,
+                                expert,
+                                return_success=True,
+                            )
+                result = param.data
+                if name != "w2":
+                    result = result.chunk(2, dim=1)[name == "w3"]
+                padding = result.narrow(
+                    dim, valid // divisor, (width - valid) // divisor
+                ).float()
+                assert torch.all(padding == (1 if is_scale else 0))
+                reconstructed[name, suffix].append(
+                    result.narrow(dim, 0, valid // divisor).view(torch.uint8)
+                )
+    for name, items in checkpoints.items():
+        for suffix, checkpoint, _, _ in items:
+            actual = torch.cat(
+                reconstructed[name, suffix], dim=2 if name == "w2" else 1
+            )
+            assert torch.equal(actual, checkpoint.view(torch.uint8))
